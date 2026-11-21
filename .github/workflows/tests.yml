@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  offline:
+    # Mocked network tests + the WASP-62 b control on committed fixture data.
+    # Live archive tests are opt-in (pytest --live) and never run here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt && pip install -e . --no-deps
+      - run: pytest -q
+      - name: CLI smoke (WASP-62 b control, offline)
+        run: |
+          period-harmonic-flag 13.622518
+          allsector-gate 149603524 --period 4.411937227697335 --epoch 3982.065462 --duration 3.632 \
+            --lc-file tests/fixtures/wasp62_s1_s2_10min.csv.gz --out-dir /tmp/wasp62

@@ -1,0 +1,41 @@
+#
+#   VizieR Astronomical Server vizier.cfa.harvard.edu
+#    Date: 2026-11-21T09:49:26 [V7.6.1]
+#   In case of problem, please report to:	cds-question@unistra.fr
+#
+#
+#Coosys	J2000:	eq_FK5 J2000
+#INFO	service_protocol=ASU	  IVOID of the protocol through which the data was retrieved
+#INFO	request_date=2026-11-21T09:49:26	  Query execution date
+#INFO	request=https://vizier.cfa.harvard.edu/viz-bin/asu-tsv?-source=J/ApJS/258/16/tess-ebs&-c=0%200&-c.rs=21&-out=TIC,Per,BJD0,Morph,Dp-pf,Ds-pf,Sectors&-out.add=_r	  Full request URL
+#INFO	contact=cds-question@unistra.fr	  Email or URL to contact publisher
+#INFO	server_software=VizieR/7.6.1	  Software version
+#INFO	publisher=CDS	  Data centre that produced the VOTable
+#INFO	MaxTuples=50000	
+#INFO	-c=000.000000+00.000000,rs=21.	
+#Constraint -out.add=_r
+
+#RESOURCE=yCat_22580016
+#Name: J/ApJS/258/16
+#Title: TESS Eclipsing Binary stars. I. Sectors 1-26 (Prsa+, 2022)
+#INFO	ivoid=ivo://cds.vizier/j/apjs/258/16	    IVOID of underlying data collection
+#INFO	data_ivoid=ivo://cds.vizier/j/apjs/258/16	    IVOID of underlying data collection
+#INFO	creator=Prsa A.	    First author or institution
+#INFO	cites=bibcode:2022ApJS..258...16P	    Article or Data origin sources
+#INFO	journal=ApJS	    Journal name
+#INFO	original_date=2022	    Year of the article publication
+#INFO	reference_url=https://cdsarc.cds.unistra.fr/viz-bin/cat/J/ApJS/258/16	    Dataset landing page
+#INFO	citation=doi:10.26093/cds/vizier.22580016	    Dataset identifier that can be used for citation
+#INFO	publication_date=2022-12-16	    Date of first publication in the data centre
+#INFO	rights_uri=https://cds.unistra.fr/vizier-org/licences_vizier.html	    Licence URI
+#Table	J_ApJS_258_16_tess-ebs:
+#Name: J/ApJS/258/16/tess-ebs
+#Title: The Eclipsing Binary stars (TESS-EBs) catalog
+#Column	_r	(F6.3)	Distance from center (000.0000000000+00.0000000000)[FK5/J2000]	[ucd=pos.angDistance]
+#Column	TIC	(A10)	[91961/2046417955] TESS input catalog (TIC) identification number (tess_id)	[ucd=meta.id;meta.main]
+#Column	Per	(F11.7)	[0.048/314.7]? Binary star orbital period (period)	[ucd=meta.id]
+#Column	BJD0	(F11.6)	[1322/2142]? Barycentric Julian Date of the first primary eclipse; BJD0-2457000	[ucd=time.epoch]
+#Column	Morph	(F6.3)	[-1/1.08] Morphology coefficient (morph_coeff) (3)	[ucd=src.morph.param]
+#Column	Dp-pf	(F9.3)	[0.00013/27772]? Primary eclipse depth estimate from the polychain fit to the phased lightcurve, in phase units	[ucd=phys.absorption.opticalDepth]
+#Column	Ds-pf	(F6.3)	[0.00028/16.95]? Secondary eclipse depth estimate from the polychain fit to the phased lightcurve, in phase units	[ucd=phys.absorption.opticalDepth]
+#Column	Sectors	(a72)	List of sectors (among 1-26) that the target has been observed in (4)	[ucd=meta.id;obs]

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shared-tools"
+version = "0.1.0"
+description = "benji's shared agent toolbox. First tools: TESS light-curve fetch, catalog veto, all-sector transit gate."
+requires-python = ">=3.11"
+dependencies = [
+    "lightkurve==2.6.0",
+    "astroquery==0.4.11",
+    "astropy==8.0.3",
+    "numpy==2.5.5",
+    "scipy==1.18.1",
+    "matplotlib==3.11.2",
+    "pandas==2.3.3",
+    "requests==2.34.2",
+    "wotan==2.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.2.0"]
+
+[project.scripts]
+tess-lc-fetch = "shared_tools.exo.tess_lc_fetch:main"
+catalog-veto = "shared_tools.exo.catalog_veto:main"
+allsector-gate = "shared_tools.exo.allsector_gate:main"
+period-harmonic-flag = "shared_tools.exo.harmonics:main"
+
+[tool.setuptools.packages.find]
+include = ["shared_tools*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: hits MAST / ExoFOP / NASA / Gaia / VizieR (run with --live)"]
+filterwarnings = ["ignore::UserWarning:lightkurve.*"]

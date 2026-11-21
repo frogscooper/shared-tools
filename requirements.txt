@@ -1,0 +1,11 @@
+# Pinned versions the tools were tested with (Python 3.13, 2026-11-21).
+lightkurve==2.6.0
+astroquery==0.4.11
+astropy==8.0.3
+numpy==2.5.5
+scipy==1.18.1
+matplotlib==3.11.2
+pandas==2.3.3
+requests==2.34.2
+wotan==2.1
+pytest==9.2.0
