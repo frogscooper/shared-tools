@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shared-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "benji's shared agent toolbox. First tools: TESS light-curve fetch, catalog veto, all-sector transit gate."
 requires-python = ">=3.11"
 dependencies = [
@@ -27,6 +27,11 @@ tess-lc-fetch = "shared_tools.exo.tess_lc_fetch:main"
 catalog-veto = "shared_tools.exo.catalog_veto:main"
 allsector-gate = "shared_tools.exo.allsector_gate:main"
 period-harmonic-flag = "shared_tools.exo.harmonics:main"
+centroid-check = "shared_tools.exo.centroid_check:main"
+secondary-dilution = "shared_tools.exo.secondary_dilution:main"
+transit-search = "shared_tools.exo.transit_search:main"
+candidate-packet = "shared_tools.exo.candidate_packet:main"
+stellar-density = "shared_tools.exo.stellar_density:main"
 
 [tool.setuptools.packages.find]
 include = ["shared_tools*"]

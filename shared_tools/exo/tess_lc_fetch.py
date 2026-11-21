@@ -42,13 +42,14 @@ UA = {"User-Agent": "shared-tools tess_lc_fetch (read-only research use)"}
 
 
 # ---------------------------------------------------------------- inventory
-def search_mast(tic: int, authors) -> list[dict]:
-    """Live MAST query through lightkurve. Returns plain dict rows."""
+def search_mast(tic: int, authors, kind: str = "lc") -> list[dict]:
+    """Live MAST query through lightkurve. kind = 'lc' or 'tpf'. Returns plain dict rows."""
     import lightkurve as lk
 
+    fn = lk.search_lightcurve if kind == "lc" else lk.search_targetpixelfile
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        sr = lk.search_lightcurve(f"TIC {tic}", mission="TESS", author=list(authors))
+        sr = fn(f"TIC {tic}", mission="TESS", author=list(authors))
     rows = []
     for r in sr.table:
         # Positional searches can return neighbors; keep only this TIC.
@@ -66,17 +67,17 @@ def search_mast(tic: int, authors) -> list[dict]:
 
 
 def inventory(tic: int, authors=AUTHORS, cache_dir: Path | None = None,
-              max_age_h: float = 24.0, refresh: bool = False) -> tuple[list[dict], dict]:
+              max_age_h: float = 24.0, refresh: bool = False, kind: str = "lc") -> tuple[list[dict], dict]:
     """MAST inventory for one TIC, cached as JSON. Falls back to a stale cache if MAST is down."""
     cache_dir = Path(cache_dir or default_cache_dir())
-    path = cache_dir / "inventory" / f"TIC{tic}.json"
+    path = cache_dir / "inventory" / (f"TIC{tic}.json" if kind == "lc" else f"TIC{tic}_{kind}.json")
     cached = json.loads(path.read_text()) if path.exists() else None
     fresh = cached and (time.time() - cached["fetched_unix"]) < max_age_h * 3600
     if cached and fresh and not refresh:
         rows, info = cached["rows"], {"source": "cache", "fetched_at": cached["fetched_at"]}
     else:
         try:
-            rows = search_mast(tic, AUTHORS)  # always inventory all authors; filter below
+            rows = search_mast(tic, AUTHORS) if kind == "lc" else search_mast(tic, AUTHORS, kind)
             write_json(path, {"tic": tic, "fetched_at": now_et(), "fetched_unix": time.time(), "rows": rows})
             info = {"source": "live", "fetched_at": now_et()}
         except Exception as exc:  # MAST flaked: use what we have, loudly
@@ -160,14 +161,16 @@ def _is_good_fits(path: Path) -> bool:
 
 
 def summarize_file(path: Path) -> dict:
-    """Quality summary + crowding keywords from a light-curve FITS file."""
+    """Quality summary + crowding keywords from a light-curve (or target-pixel) FITS file."""
     with fits.open(path) as hdul:
         hdr, data = hdul[1].header, hdul[1].data
         names = data.columns.names
-        flux_col = "PDCSAP_FLUX" if "PDCSAP_FLUX" in names else ("KSPSAP_FLUX" if "KSPSAP_FLUX" in names else "SAP_FLUX")
+        flux_col = next(c for c in ("PDCSAP_FLUX", "KSPSAP_FLUX", "SAP_FLUX", "FLUX") if c in names)
         t = np.asarray(data["TIME"], float)
         q = np.asarray(data["QUALITY"], int) if "QUALITY" in names else np.zeros(len(t), int)
         flux = np.asarray(data[flux_col], float)
+        if flux.ndim == 3:  # TPF: a cadence is finite if any pixel is
+            flux = np.where(np.isfinite(flux).any(axis=(1, 2)), 1.0, np.nan)
     finite = np.isfinite(t) & np.isfinite(flux)
     good = finite & (q == 0)
     return {
@@ -183,7 +186,7 @@ def summarize_file(path: Path) -> dict:
 
 # ---------------------------------------------------------------- main entry
 def fetch(tics, authors=AUTHORS, cache_dir: Path | None = None, exptimes=None, pick: str = "all",
-          refresh: bool = False, load: bool = True, max_age_h: float = 24.0):
+          refresh: bool = False, load: bool = True, max_age_h: float = 24.0, sectors=None, kind: str = "lc"):
     """Fetch light curves for one or more TICs.
 
     Returns (LightCurveCollection or None, manifest dict). The manifest is also written to
@@ -195,10 +198,12 @@ def fetch(tics, authors=AUTHORS, cache_dir: Path | None = None, exptimes=None, p
     authors = [a.upper() for a in authors]
     rows_out, inv_info, failures, n_hit, n_dl = [], {}, [], 0, 0
     for tic in tics:
-        inv, info = inventory(tic, authors, cache_dir, max_age_h=max_age_h, refresh=refresh)
+        inv, info = inventory(tic, authors, cache_dir, max_age_h=max_age_h, refresh=refresh, kind=kind)
         inv_info[str(tic)] = {**info, "n_inventory": len(inv)}
+        if sectors:
+            inv = [r for r in inv if r["sector"] in {int(x) for x in sectors}]
         for r in dedupe(inv, exptimes, pick):
-            dest = cache_dir / "lc" / f"TIC{tic}" / r["productFilename"]
+            dest = cache_dir / kind / f"TIC{tic}" / r["productFilename"]
             if dest.exists() and _is_good_fits(dest):
                 n_hit += 1
             else:
@@ -215,10 +220,11 @@ def fetch(tics, authors=AUTHORS, cache_dir: Path | None = None, exptimes=None, p
                 "product_uri": r["dataURI"], "filename": r["productFilename"], "local_path": str(dest), **s,
             })
     key = "_".join(f"TIC{t}" for t in tics) + "__" + "-".join(authors) \
-        + (f"__exp{'-'.join(str(int(e)) for e in exptimes)}" if exptimes else "") + f"__{pick}"
+        + (f"__exp{'-'.join(str(int(e)) for e in exptimes)}" if exptimes else "") + f"__{pick}" \
+        + (f"__s{'-'.join(str(int(x)) for x in sorted(sectors))}" if sectors else "") + ("" if kind == "lc" else f"__{kind}")
     manifest = {
         "tool": "tess_lc_fetch", "generated_at": now_et(), "tics": tics, "authors": authors,
-        "exptimes": exptimes, "pick": pick, "cache_dir": str(cache_dir),
+        "exptimes": exptimes, "pick": pick, "kind": kind, "sectors": sectors, "cache_dir": str(cache_dir),
         "inventory": inv_info, "cache_hits": n_hit, "downloaded": n_dl, "failures": failures,
         "complete": not failures, "products": rows_out,
         "manifest_hash": canonical_hash(rows_out),
@@ -230,7 +236,7 @@ def fetch(tics, authors=AUTHORS, cache_dir: Path | None = None, exptimes=None, p
         w.writeheader()
         w.writerows(jsonable(rows_out))
     manifest["manifest_paths"] = [str(mdir / f"{key}.json"), str(mdir / f"{key}.csv")]
-    return (load_collection(manifest) if load else None), manifest
+    return (load_collection(manifest) if (load and kind == "lc") else None), manifest
 
 
 def load_collection(manifest: dict):
@@ -251,9 +257,12 @@ def main(argv=None) -> int:
     ap.add_argument("--pick", choices=["all", "best"], default="all", help="best = one product per sector")
     ap.add_argument("--cache-dir", type=Path, default=None)
     ap.add_argument("--refresh", action="store_true", help="re-query MAST even if the inventory is fresh")
+    ap.add_argument("--sectors", type=lambda s: [int(x) for x in s.split(",") if x], help="e.g. 1,4,8")
+    ap.add_argument("--tpf", action="store_true", help="fetch target pixel files instead of light curves")
     args = ap.parse_args(argv)
     _, m = fetch(args.tic, authors=args.author or AUTHORS, cache_dir=args.cache_dir,
-                 exptimes=args.exptime, pick=args.pick, refresh=args.refresh, load=False)
+                 exptimes=args.exptime, pick=args.pick, refresh=args.refresh, load=False,
+                 sectors=args.sectors, kind="tpf" if args.tpf else "lc")
     secs = sorted({(p["author"], p["sector"], p["cadence_s"]) for p in m["products"]}, key=lambda x: (x[1], x[0]))
     print(json.dumps({k: m[k] for k in ("tics", "inventory", "cache_hits", "downloaded", "failures",
                                         "complete", "manifest_hash", "manifest_paths")}, indent=2))

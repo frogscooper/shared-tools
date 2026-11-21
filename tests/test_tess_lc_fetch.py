@@ -33,7 +33,7 @@ def fake_fits(path):
 def mocked(monkeypatch):
     calls = {"search": 0, "download": 0}
 
-    def search(tic, authors):
+    def search(tic, authors, kind="lc"):
         calls["search"] += 1
         return INV
 
@@ -86,7 +86,7 @@ def test_manifest_csv_written(mocked, tmp_path):
 def test_mast_down_uses_stale_inventory(mocked, tmp_path, monkeypatch):
     f.fetch(7, cache_dir=tmp_path, load=False)
 
-    def boom(tic, authors):
+    def boom(tic, authors, kind="lc"):
         raise ConnectionError("MAST 503")
 
     monkeypatch.setattr(f, "search_mast", boom)
@@ -95,13 +95,13 @@ def test_mast_down_uses_stale_inventory(mocked, tmp_path, monkeypatch):
 
 
 def test_mast_down_without_cache_raises(tmp_path, monkeypatch):
-    monkeypatch.setattr(f, "search_mast", lambda t, a: (_ for _ in ()).throw(ConnectionError("down")))
+    monkeypatch.setattr(f, "search_mast", lambda t, a, k="lc": (_ for _ in ()).throw(ConnectionError("down")))
     with pytest.raises(RuntimeError):
         f.fetch(7, cache_dir=tmp_path, load=False)
 
 
 def test_download_failure_is_recorded_not_hidden(tmp_path, monkeypatch):
-    monkeypatch.setattr(f, "search_mast", lambda t, a: INV[:1])
+    monkeypatch.setattr(f, "search_mast", lambda t, a, k="lc": INV[:1])
     monkeypatch.setattr(f, "_download", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("403")))
     _, m = f.fetch(7, cache_dir=tmp_path, load=False)
     assert not m["complete"] and m["failures"][0]["sector"] == 1

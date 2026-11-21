@@ -246,7 +246,9 @@ def _neighbor_rows(df, tid, g0, depth_ppm):
                "is_target": tid is not None and int(x.source_id) == tid}
         if depth_ppm and dg is not None and not row["is_target"]:
             # Eclipse depth this neighbor would need to produce the observed depth when fully blended.
-            row["needed_eclipse_depth"] = round(depth_ppm * 1e-6 * (1 + 10 ** (0.4 * dg)), 4)
+            from .secondary_dilution import needed_depth
+
+            row["needed_eclipse_depth"] = round(needed_depth(depth_ppm, dg), 4)
             row["could_mimic_depth"] = row["needed_eclipse_depth"] <= 1.0
         rows.append(row)
     return rows
@@ -301,7 +303,9 @@ def tic_position(tic: int) -> dict:
         raise SourceDown(f"TIC {tic} not found in MAST TIC")
     gaia = t["GAIA"][0] if "GAIA" in t.colnames else None
     gaia = None if (gaia is None or np.ma.is_masked(gaia) or not str(gaia).strip()) else int(gaia)
-    return {"ra": float(t["ra"][0]), "dec": float(t["dec"][0]), "tmag": _num(t["Tmag"][0]), "gaia_dr2_id": gaia}
+    return {"ra": float(t["ra"][0]), "dec": float(t["dec"][0]), "tmag": _num(t["Tmag"][0]), "gaia_dr2_id": gaia,
+            "pmra": _num(t["pmRA"][0]) if "pmRA" in t.colnames else None,
+            "pmdec": _num(t["pmDEC"][0]) if "pmDEC" in t.colnames else None}
 
 
 # ---------------------------------------------------------------- period aliases

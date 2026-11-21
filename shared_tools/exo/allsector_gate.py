@@ -128,9 +128,7 @@ def segments(t):
     return list(zip(starts, ends))
 
 
-def robust_std(x):
-    x = x[np.isfinite(x)]
-    return 1.4826 * np.median(np.abs(x - np.median(x))) if len(x) > 2 else np.nan
+from .folding import robust_std  # noqa: E402  (re-exported for transit_search / secondary_dilution)
 
 
 # ---------------------------------------------------------------- per-event measurement
@@ -218,22 +216,37 @@ def error_scale(evs) -> float:
 
 
 def fold_depth(secs, t0, period, dur_d, phase_center):
-    """Depth of the folded light curve in a window of width 0.8*duration at phase_center."""
-    t = np.concatenate([s["time"][s["good"]] for s in secs]) if secs else np.array([])
-    f = np.concatenate([s["flat"][s["good"]] for s in secs]) if secs else np.array([])
+    """Robust folded depth at a phase (see folding.phase_depth)."""
+    from .folding import phase_depth
+
+    if not secs:
+        return {"depth_ppm": None, "err_ppm": None, "snr": None, "n_in": 0}
+    t = np.concatenate([s["time"][s["good"]] for s in secs])
+    f = np.concatenate([s["flat"][s["good"]] for s in secs])
     ok = np.isfinite(f)
-    t, f = t[ok], f[ok]
-    ph = (((t - t0) / period - phase_center + 0.5) % 1.0) - 0.5      # phase rel. to center
-    prim = np.abs((((t - t0) / period + 0.5) % 1.0) - 0.5) * period   # days from primary
-    w = 0.4 * dur_d / period
-    inn = np.abs(ph) <= w
-    out = (np.abs(ph) > 2.5 * w) & (np.abs(ph) < 0.15) & (prim > 1.5 * dur_d)
-    if inn.sum() < 10 or out.sum() < 30:
-        return {"depth_ppm": None, "err_ppm": None, "snr": None, "n_in": int(inn.sum())}
-    base = np.median(f[out])
-    d = base - np.mean(f[inn])
-    e = robust_std(f[out]) * np.sqrt(1 / inn.sum() + 1 / out.sum())
-    return {"depth_ppm": round(d * 1e6, 1), "err_ppm": round(e * 1e6, 1), "snr": round(d / e, 2), "n_in": int(inn.sum())}
+    return phase_depth(t[ok], f[ok], t0, period, dur_d, phase_center, exclude_primary=phase_center != 0.0)
+
+
+def prepare_sectors(secs, period_d, epoch_btjd, dur_d, window_d=None):
+    """Add 'good' (quality mask), 'flat' (detrended, transits masked) and 'epochs' to each sector dict.
+
+    With period_d=None nothing is masked (used by transit_search before any signal is known).
+    """
+    for s in secs:
+        t, f, q = s["time"], s["flux"], s["quality"]
+        fin = np.isfinite(t) & np.isfinite(f)
+        bad_bits = DEFAULT_BAD if s["author"] != "QLP" else ~0  # QLP: any nonzero flag is bad
+        s["good"] = fin & ((q & bad_bits) == 0)
+        in_tr = np.zeros(len(t), bool)
+        n = np.array([], int)
+        if period_d and fin.any():
+            n = np.arange(np.floor((np.nanmin(t[fin]) - epoch_btjd) / period_d),
+                          np.ceil((np.nanmax(t[fin]) - epoch_btjd) / period_d) + 1).astype(int)
+            for tc in epoch_btjd + n * period_d:
+                in_tr |= np.abs(t - tc) <= 0.75 * dur_d
+        s["epochs"] = n
+        s["flat"] = detrend(t, f, s["good"], in_tr, window_d or max(0.5, 3.0 * dur_d))
+    return secs
 
 
 # ---------------------------------------------------------------- gate
@@ -244,19 +257,11 @@ def gate(tic, period_d, epoch_btjd, duration_h, depth_ppm=None, claimed_sectors=
     claimed = sorted({int(s) for s in claimed_sectors}) if claimed_sectors else None
     secs, load_info = load_sectors(tic, cache_dir, lc_files)
 
+    prepare_sectors(secs, P, T0, dur_d)
     events = []
     for s in secs:
-        t, f, q = s["time"], s["flux"], s["quality"]
-        fin = np.isfinite(t) & np.isfinite(f)
-        bad_bits = DEFAULT_BAD if s["author"] != "QLP" else ~0  # QLP: any nonzero flag is bad
-        s["good"] = fin & ((q & bad_bits) == 0)
-        n = np.arange(np.floor((np.nanmin(t[fin]) - T0) / P), np.ceil((np.nanmax(t[fin]) - T0) / P) + 1) if fin.any() else []
-        tcs = T0 + np.asarray(n) * P
-        in_tr = np.zeros(len(t), bool)
-        for tc in tcs:
-            in_tr |= np.abs(t - tc) <= 0.75 * dur_d
-        s["flat"] = detrend(t, f, s["good"], in_tr, max(0.5, 3.0 * dur_d))
-        for k, tc in zip(n, tcs):
+        t, fin = s["time"], np.isfinite(s["time"]) & np.isfinite(s["flux"])
+        for k, tc in zip(s["epochs"], T0 + s["epochs"] * P):
             if np.nanmin(t[fin]) - dur_d <= tc <= np.nanmax(t[fin]) + dur_d:
                 ev = measure_event(s, tc, dur_d)
                 ev["epoch"] = int(k)
@@ -358,7 +363,7 @@ def gate(tic, period_d, epoch_btjd, duration_h, depth_ppm=None, claimed_sectors=
     usable = [s for s in secs if np.isfinite(s["flat"]).any()]
     prim = fold_depth(usable, T0, P, dur_d, 0.0)
     sec = fold_depth(usable, T0, P, dur_d, 0.5)
-    scan = [dict(phase=round(c, 3), **fold_depth(usable, T0, P, dur_d, c)) for c in np.arange(0.1, 0.91, 0.05)]
+    scan = [fold_depth(usable, T0, P, dur_d, c) for c in np.arange(0.1, 0.91, 0.05)]
     scan = [x for x in scan if x["snr"] is not None]
     pd_ = prim["depth_ppm"] or ref
     if sec["snr"] is None:
