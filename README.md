@@ -19,9 +19,14 @@ are controls only.
 | `centroid-check` | Is the dip on the target? Difference-image centroid, brightest difference pixel, depth vs aperture, photocenter shift. | [docs/centroid_check.md](docs/centroid_check.md) |
 | `secondary-dilution` | Is there a phase-0.5 or eccentric secondary? Which Gaia neighbors are bright enough to fake the depth? | [docs/secondary_dilution.md](docs/secondary_dilution.md) |
 | `candidate-packet` | One review folder: packet.md, signal.json, all plots, and a candidates.csv row. | [docs/candidate_packet.md](docs/candidate_packet.md) |
+| `cross-star-veto` | Cadence masks (quality bits, momentum dumps, scattered light, orbit edges), then flag dip epochs shared by many stars on one CCD. | [docs/cross_star_veto.md](docs/cross_star_veto.md) |
+| `duo-solver` | Two single transits: list the allowed periods P = ΔT/n, drop every alias the measured coverage rules out, and run the duo gate. | [docs/duo_solver.md](docs/duo_solver.md) |
+| `batch-runner` | Resumable duo funnel over TICs or one sector/camera/CCD, with a funnel CSV and a known-duo control. | [docs/batch_runner.md](docs/batch_runner.md) |
 | `stellar-density` | rho* = 3π/(G P²)(a/Rs)³ in cgs, compared with the TIC M/R³. | [docs/stellar_density.md](docs/stellar_density.md) |
 
-Typical flow: `transit-search`, then `catalog-veto`, then `allsector-gate`, then `candidate-packet`.
+Typical flow for periodic signals: `transit-search`, then `catalog-veto`, then `allsector-gate`, then `candidate-packet`.
+Typical flow for long-period duos: `batch-runner` does select, coverage, light curves, masks and dips, `cross-star-veto`,
+cross-year pairs, `duo-solver`, then a duo `candidate-packet`.
 The packet runs the gate, centroid, secondary and catalog checks itself.
 
 ```bash
@@ -36,6 +41,10 @@ centroid-check 288183107 --period 12.96393 --epoch 3319.20707 --duration 6.208 -
 secondary-dilution 149603524 --period 4.411937 --epoch 3982.065462 --duration 3.632
 candidate-packet 261136679 --signals ~/.cache/shared_tools/transit_search/TIC261136679/signals.json --rank 1 --tpf-sectors 1,4,8,11,12,13
 stellar-density 4.411937 --a-rs 9.8785 --mstar 1.28 --rstar 1.21
+cross-star-veto --dips tests/fixtures/hunter_overnight_dips.csv --tol 1.0 --max-stars 1
+duo-solver 232608943 --t1 1785.96 --t2 2751.5986 --duration 10.85 --depth 12000 --pmin 10 --rho 1.45
+candidate-packet 232608943 --t1 1785.96 --t2 2751.5986 --duration 10.85 --depth 12000 --tpf-sectors 17,53
+batch-runner --control toi4600c --run-dir runs/control_toi4600c
 ```
 
 Cache: `$SHARED_TOOLS_CACHE` (default `~/.cache/shared_tools`). Re-running any tool reuses

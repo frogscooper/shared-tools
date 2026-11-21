@@ -82,3 +82,18 @@ def test_live_injected_single_in_pi_men_s1(tmp_path):
     r = search(261136679, lc_files=[tmp_path / "inj.csv"], pmin=1, pmax=12, n_signals=1, out_dir=tmp_path / "o")
     hits = [s for s in r["signals"] if s["kind"] == "single" and abs(s["epoch_btjd"] - tc) < 0.1]
     assert hits and hits[0]["depth_ppm"] == pytest.approx(1000, rel=0.3)
+
+
+def test_binned_flat_keeps_ffi_cadence_points():
+    """30-min FFI data binned at 10 min used to leave one point per bin, and every bin was dropped."""
+    import numpy as np
+
+    from shared_tools.exo.transit_search import binned_flat
+
+    t = np.arange(0, 10, 30 / 1440)
+    sec = {"sector": 9, "time": t, "flat": np.ones(len(t)), "good": np.ones(len(t), bool)}
+    tb, fb, eb, sb = binned_flat([sec], 10.0)
+    assert len(tb) == len(t)
+    t2 = np.arange(0, 10, 2 / 1440)
+    tb2, *_ = binned_flat([{"sector": 9, "time": t2, "flat": np.ones(len(t2)), "good": np.ones(len(t2), bool)}], 10.0)
+    assert len(tb2) == pytest.approx(len(t2) / 5, rel=0.01)

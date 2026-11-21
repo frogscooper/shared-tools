@@ -8,4 +8,5 @@ matplotlib==3.11.2
 pandas==2.3.3
 requests==2.34.2
 wotan==2.1
+tess-point==0.9.2
 pytest==9.2.0

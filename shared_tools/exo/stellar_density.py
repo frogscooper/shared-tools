@@ -45,6 +45,19 @@ def stellar_density(period_d: float, a_rs: float | None = None, a_rs_err: float 
     return out
 
 
+def a_rs_from_density(period_d: float, rho_solar: float) -> float:
+    """Inverse of stellar_density: a/Rs = (G rho P^2 / 3 pi)^(1/3), cgs."""
+    p_s = period_d * DAY_S
+    return (G_CGS * rho_solar * RHO_SUN_CGS * p_s ** 2 / (3 * math.pi)) ** (1.0 / 3.0)
+
+
+def expected_duration_h(period_d: float, rho_solar: float, k: float = 0.0, b: float = 0.0) -> float:
+    """Total transit duration T14 (hours) for a circular orbit: P/pi * asin(sqrt((1+k)^2 - b^2) / (a/Rs))."""
+    a_rs = a_rs_from_density(period_d, rho_solar)
+    x = math.sqrt(max((1 + k) ** 2 - b ** 2, 0.0)) / a_rs
+    return period_d * 24 / math.pi * math.asin(min(x, 1.0))
+
+
 def catalog_density_solar(mstar_msun: float, rstar_rsun: float) -> float:
     return mstar_msun / rstar_rsun ** 3
 

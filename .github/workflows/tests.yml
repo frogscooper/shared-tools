@@ -25,3 +25,4 @@ jobs:
           candidate-packet 149603524 --period 4.411937227697335 --epoch 3982.065462 --duration 3.632 \
             --lc-file tests/fixtures/wasp62_s1_s2_10min.csv.gz --offline --out /tmp/packets
           stellar-density 4.411937227697335 --a-rs 9.878547344809917 --mstar 1.28 --rstar 1.21
+          cross-star-veto --dips tests/fixtures/hunter_overnight_dips.csv --tol 1.0 --max-stars 1 --out-dir /tmp/veto

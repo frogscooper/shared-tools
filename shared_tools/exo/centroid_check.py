@@ -66,12 +66,22 @@ def circle(shape, x, y, r):
     return (xx - x) ** 2 + (yy - y) ** 2 <= r * r
 
 
-def transit_masks(t, good, tcs, dur_d):
+def transit_masks(t, good, tcs, dur_d, local_d=None):
+    """In-transit (|dt| <= 0.45 dur) and out-of-transit (|dt| > 1.5 dur) cadences.
+
+    local_d: keep only out-of-transit cadences within local_d of an event. Use it for single events,
+    where a whole-sector baseline lets slow drifts and pointing changes dominate the difference image.
+    """
     intr = np.zeros(len(t), bool)
     oot = np.ones(len(t), bool)
+    near = np.zeros(len(t), bool)
     for tc in tcs:
         intr |= np.abs(t - tc) <= 0.45 * dur_d
         oot &= np.abs(t - tc) > 1.5 * dur_d
+        if local_d:
+            near |= np.abs(t - tc) <= local_d
+    if local_d:
+        oot &= near
     return intr & good, oot & good
 
 
@@ -172,7 +182,7 @@ def combine_photocenter(rows) -> dict:
             "source_offset_px": round(off, 3), "source_offset_err_px": round(sig, 3), "verdict": offset_verdict(off, sig)}
 
 
-def analyze_tpf(tpf, ra, dec, period_d, epoch_btjd, duration_h, pmra=None, pmdec=None) -> tuple[dict, dict]:
+def analyze_tpf(tpf, ra, dec, period_d, epoch_btjd, duration_h, pmra=None, pmdec=None, oot_local_d=None) -> tuple[dict, dict]:
     """Return (result row, images for plotting) for one TPF."""
     dur_d = duration_h / 24.0
     t = np.asarray(tpf.time.value, float)
@@ -194,8 +204,8 @@ def analyze_tpf(tpf, ra, dec, period_d, epoch_btjd, duration_h, pmra=None, pmdec
     if not tcs:
         row.update(status="no_transit_in_tpf", verdict="inconclusive")
         return row, {}
-    intr, oot = transit_masks(t, good, tcs, dur_d)
-    row.update(n_in=int(intr.sum()), n_out=int(oot.sum()))
+    intr, oot = transit_masks(t, good, tcs, dur_d, oot_local_d)
+    row.update(n_in=int(intr.sum()), n_out=int(oot.sum()), oot_local_d=oot_local_d)
     if intr.sum() < 3 or oot.sum() < 10:
         row.update(status="too_few_cadences", verdict="inconclusive")
         return row, {}
@@ -294,7 +304,7 @@ def plot_tpf(row, img, path):
 
 
 def check(tic, period_d, epoch_btjd, duration_h, sectors=None, ra=None, dec=None, pmra=None, pmdec=None,
-          cache_dir=None, tpf_files=None, out_dir=None, plot=True, authors=("SPOC", "TESS-SPOC")) -> dict:
+          cache_dir=None, tpf_files=None, out_dir=None, plot=True, authors=("SPOC", "TESS-SPOC"), oot_local_d=None) -> dict:
     import lightkurve as lk
 
     tic = parse_tic(tic)
@@ -326,7 +336,7 @@ def check(tic, period_d, epoch_btjd, duration_h, sectors=None, ra=None, dec=None
             tpf = lk.read(f, quality_bitmask="none")
         if sectors and int(tpf.meta.get("SECTOR", -1)) not in set(sectors):
             continue
-        row, img = analyze_tpf(tpf, ra, dec, float(period_d), float(epoch_btjd), float(duration_h), pmra, pmdec)
+        row, img = analyze_tpf(tpf, ra, dec, float(period_d), float(epoch_btjd), float(duration_h), pmra, pmdec, oot_local_d)
         row["file"] = f
         if plot and img:
             row["plot"] = str(plot_tpf(row, img, out_dir / f"centroid_s{row['sector']}.png"))

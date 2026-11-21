@@ -44,6 +44,10 @@ def binned_flat(secs, bin_min):
         t, f = s["time"][ok], s["flat"][ok]
         if len(t) < 10:
             continue
+        if np.median(np.diff(t)) * 1440 >= bin_min / 2:
+            # FFI cadence (10 or 30 min) already at the bin size: binning would leave one point per bin
+            ts.append(t), fs.append(f), es.append(np.full(len(t), robust_std(f))), ss.append(np.full(len(t), s["sector"]))
+            continue
         idx = np.floor((t - t[0]) / (bin_min / 1440.0)).astype(int)
         cnt = np.bincount(idx)
         keep = cnt >= 2
