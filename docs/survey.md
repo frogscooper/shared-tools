@@ -16,6 +16,10 @@ survey reclassify --dir surveys/s70-75                      # re-apply class rul
 
 ## The three tiers
 
+`--profile fast` (default): 1 quick sector per star, 150 deep stars per CCD. `--profile deep`: 3 quick sectors,
+300 deep stars. That's about 3× the downloads, and it catches shallower signals. `--quick-sectors` and
+`--max-deep` override either one.
+
 | tier | who | what | cost |
 |---|---|---|---|
 | quick | every selected star on every CCD | That sector's TESS-SPOC light curve, from a URL built from the TIC (no MAST search). Plus `--quick-sectors − 1` earlier sectors from tess-point. Detrend, banded BLS (pmin 0.5 d), single-dip search. The file is deleted unless the best signal has SNR ≥ 6. | ~1.2 MB and ~0.4 s CPU per star; downloads (`--dl-threads` 6) overlap with searches (`--workers`) |
@@ -36,6 +40,21 @@ Spotted, rotating and pulsating stars also fail the planet tests, with wide sinu
 far too long for the star. They're counted in the `variables` column and kept off the leaderboard. On
 the first live slice (S74/1/2, 60 brightest stars) a looser rule called 8 stars EBs; 7 were rotators.
 The rule now keeps only TIC 99725941 (the Gaia SB2).
+
+### Tags: what makes a lead rare
+
+| tag | meaning |
+|---|---|
+| timing_variation | transits or eclipses arrive early or late (`eclipse-timing`; ≥ 6 timed events, χ²_red ≥ 4). Another planet, or a third body around an EB |
+| extra_dips | strong dips on the star that the main signal doesn't explain and that are shallower than it: another planet, a circumbinary planet, or a tertiary eclipse |
+| period_check | EB eclipses as deep as the main one but off its ephemeris: the BLS period is wrong or the orbit is eccentric (TIC 99725941: BLS 11.53 d, true 44.96 d, e = 0.41) |
+| jupiter_bd_or_mdwarf_size | 8–25 Re and not grazing: a Jupiter, a brown dwarf, or a low-mass star. Only radial velocities tell them apart, and eclipsing brown dwarfs are rare (a few dozen known) |
+| stellar_companion | ≥ 10% deep, grazing and ≥ 3%, or > 25 Re: a star |
+| small_planet | planet candidate under 2 Re |
+| long_period | P ≥ 20 d, or a single or duo transit |
+
+Within each class, leads with more rare tags rank higher (`long_period` alone doesn't count).
+`--max-timing` (10) planet/EB leads per CCD get the timing check.
 
 `survey reclassify --dir D` re-applies the classify rules to finished CCDs. It uses the cached catalog
 checks, so it takes seconds.

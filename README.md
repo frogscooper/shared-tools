@@ -25,6 +25,7 @@ are controls only.
 | `stellar-density` | rho* = 3π/(G P²)(a/Rs)³ in cgs, compared with the TIC M/R³. | [docs/stellar_density.md](docs/stellar_density.md) |
 | `duration-check` | Is this T14 possible for the star's density, period and depth? Flags grazing (likely EB) and too-long transits. | [docs/duration_check.md](docs/duration_check.md) |
 | `bls-triage` | The CCD-wide BLS cuts (SNR, transits, odd/even, dominance, harmonics, integer days, radius, grid edge, duration, shared-epoch systematics) → survivors and near misses. | [docs/bls_triage.md](docs/bls_triage.md) |
+| `eclipse-timing` | Do transits/eclipses arrive on time? Per-event mid-times, O−C, χ²; flags TTVs/ETVs (another planet, a third body). | [docs/eclipse_timing.md](docs/eclipse_timing.md) |
 | `survey` | **Scan many sectors × cameras × CCDs fast**: a quick single-sector look at every star (direct URLs, files deleted after), the full `hunt` on flagged stars, then classes (planet, duo, single transit, EB) with catalog novelty and one leaderboard. | [docs/survey.md](docs/survey.md) |
 | `hunt` | **One resumable command per CCD**: controls → select → parallel fetch → duo funnel → BLS → triage → gate → vet → `summary.md` + hunt-log draft. Time-boxed chunks or `--detach`. | [docs/hunt.md](docs/hunt.md) |
 

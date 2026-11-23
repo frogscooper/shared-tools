@@ -40,6 +40,7 @@ hunt = "shared_tools.exo.hunt:main"
 bls-triage = "shared_tools.exo.bls_triage:main"
 duration-check = "shared_tools.exo.duration_check:main"
 survey = "shared_tools.exo.survey:main"
+eclipse-timing = "shared_tools.exo.timing:main"
 
 [tool.setuptools.packages.find]
 include = ["shared_tools*"]

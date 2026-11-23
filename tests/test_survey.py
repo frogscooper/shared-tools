@@ -95,9 +95,29 @@ def test_survey_offline_end_to_end(ccd, capsys):
     assert cls.get(2) == "eb_candidate"
     assert cls.get(3) == "single_transit"
     assert ROTATOR not in cls                                         # a spotted star is a variable, not a lead
+    tags = {int(r.tic): str(r.tags) for _, r in lb.iterrows()}
+    assert "long_period" in tags[3] and "timing_variation" not in tags[1]   # steady planet: no TTV flag
+    cl = json.loads((job / "classify.json").read_text())
+    assert any(p.name.startswith("timing_TIC1_") for p in (job / "stages" / "classify").glob("*.json"))
     assert lb.iloc[0]["class"] == "planet_candidate" and lb.novelty.str.startswith("new").all()
     md = (d / "survey_summary.md").read_text()
     assert "1/1 CCDs done" in md and len(md.splitlines()) < 60
     assert survey.status(d) == 0 and survey.top(d, 5) == 0
     out = capsys.readouterr().out
     assert "planet_candidate" in out and len(out.splitlines()) < 12
+
+
+def test_extra_dips_and_size_tags(tmp_path):
+    bls = tmp_path / "stages" / "bls"
+    bls.mkdir(parents=True)
+    singles = [{"epoch_btjd": 1000.0, "duration_h": 3, "depth_ppm": 20000, "snr": 50},     # on the ephemeris
+               {"epoch_btjd": 1005.0, "duration_h": 3, "depth_ppm": 400, "snr": 12},       # mid-phase: secondary
+               {"epoch_btjd": 1013.3, "duration_h": 3, "depth_ppm": 900, "snr": 15},       # shallow, off-phase
+               {"epoch_btjd": 1022.6, "duration_h": 3, "depth_ppm": 15000, "snr": 40}]     # deep, off-phase
+    (bls / "TIC9.json").write_text(json.dumps({"singles": singles}))
+    ex = survey.extra_dips(tmp_path, 9, 10.0, 1000.0, 3.0, [])
+    assert [x["t"] for x in ex] == [1013.3, 1022.6]
+    r = {"class": "single_transit", "depth_ppm": 10000.0}
+    assert survey.size_tags(r, 1.0) == ["jupiter_bd_or_mdwarf_size", "long_period"] and r["rp_re"] == pytest.approx(10.9, abs=0.1)
+    assert "stellar_companion" in survey.size_tags({"class": "eb_candidate", "depth_ppm": 150000.0, "period_d": 3.0}, 1.0)
+    assert survey.size_tags({"class": "planet_candidate", "depth_ppm": 200.0, "period_d": 3.0}, 1.0) == ["small_planet"]

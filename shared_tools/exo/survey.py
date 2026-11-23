@@ -53,7 +53,7 @@ from .common import default_cache_dir, jsonable, now_et, today_et, write_json
 EXIT_PAUSED = 75
 QUICK = {"snr_periodic": 7.0, "min_transits": 2, "snr_single": 8.0, "keep_snr": 6.0}
 CLASS_ORDER = {"planet_candidate": 0, "duo_candidate": 1, "single_transit": 2, "eb_candidate": 3}
-LB_COLS = ["rank", "class", "novelty", "tic", "sector", "camera", "ccd", "period_d", "epoch_btjd", "duration_h",
+LB_COLS = ["rank", "class", "novelty", "tags", "tic", "sector", "camera", "ccd", "period_d", "epoch_btjd", "duration_h",
            "depth_ppm", "snr", "why", "catalog_flags", "evidence"]
 SIGNAL_KEYS = ["period_d", "epoch_btjd", "duration_h", "depth_ppm", "snr", "n_transits", "odd_even_sigma",
                "harmonic_flag", "duration_at_grid_edge", "sinusoid_like"]
@@ -381,10 +381,92 @@ def classify(a, j, run, deadline):
     for r in ebs[a.max_veto:] + singles[a.max_veto:]:
         r["novelty"] = "unchecked (below --max-veto)"
     rows += ebs + singles
+    rows = tag_rows(a, run, dd, rows, wins, deadline)
     out = {"job": job_name(j), "rows": rows, "counts": {c: sum(r["class"] == c for r in rows) for c in CLASS_ORDER},
            "n_variable": (flagged.get("n_variable") or 0) + n_var}
     write_json(run.dir / "classify.json", out)
     return out
+
+
+# ---------------------------------------------------------------- rare-object tags
+RSUN_RE = 109.08
+RARE = {"timing_variation", "extra_dips", "small_planet", "jupiter_bd_or_mdwarf_size", "long_period", "stellar_companion"}
+OWN_ECLIPSE_FRAC = 0.3   # an EB's unexplained dip at least this deep vs the main one is probably its own eclipse
+
+
+def size_tags(r, rstar):
+    """What the depth says about the body's size (a transit alone cannot tell a Jupiter from a brown dwarf or M dwarf)."""
+    tags, dep = [], (r.get("depth_ppm") or 0) * 1e-6
+    rp = math.sqrt(dep) * rstar * RSUN_RE if rstar and dep > 0 and math.isfinite(rstar) else None
+    r["rp_re"] = None if rp is None else round(rp, 2)
+    grazing = "grazing" in str(r.get("why", ""))
+    if dep >= 0.10 or (grazing and dep >= 0.03) or (rp is not None and rp > 25):
+        tags.append("stellar_companion")
+    elif rp is not None and 8 <= rp <= 25 and not grazing:
+        tags.append("jupiter_bd_or_mdwarf_size")
+    elif rp is not None and rp < 2.0 and r["class"] == "planet_candidate":
+        tags.append("small_planet")
+    if (r.get("period_d") or 0) >= 20 or r["class"] in ("single_transit", "duo_candidate"):
+        tags.append("long_period")
+    return tags
+
+
+def extra_dips(dd, tic, P, T0, dur_h, wins, snr_min=8.0):
+    """Strong single dips on this star that the main signal does not explain: another planet, or a third body."""
+    bp = Path(dd) / "stages" / "bls" / f"TIC{int(tic)}.json"
+    if not bp.exists() or not P:
+        return []
+    out = []
+    for s in json.loads(bp.read_text()).get("singles", []):
+        if s["snr"] < snr_min or s.get("near_gap_or_edge") or any(w["start_btjd"] <= s["epoch_btjd"] <= w["end_btjd"] for w in wins):
+            continue
+        tol = 1.0 * max(dur_h, s["duration_h"]) / 24
+        ph = ((s["epoch_btjd"] - T0 + 0.5 * P) % P) - 0.5 * P
+        sec = ((s["epoch_btjd"] - T0) % P) - 0.5 * P        # an EB's secondary near phase 0.5 is expected
+        if abs(ph) > tol and abs(sec) > max(tol, 0.1 * P):
+            out.append({"t": round(s["epoch_btjd"], 3), "depth_ppm": s["depth_ppm"]})
+    return out
+
+
+def tag_rows(a, run, dd, rows, wins, deadline):
+    from .timing import timing
+
+    rstar = {}
+    for p in (Path(dd) / "stages" / "select").glob("*.json"):
+        for x in json.loads(p.read_text()).get("selected", []):
+            rstar[int(x["tic"])] = x.get("rstar")
+    lcs = {}
+    for r in rows:
+        tags = size_tags(r, rstar.get(int(r["tic"])))
+        if r["class"] in ("planet_candidate", "eb_candidate") and r.get("period_d"):
+            ex = extra_dips(dd, r["tic"], r["period_d"], r.get("epoch_btjd") or 0, r.get("duration_h") or 3, wins)
+            main = r.get("depth_ppm") or 0
+            own = [x for x in ex if r["class"] == "eb_candidate" and x["depth_ppm"] >= OWN_ECLIPSE_FRAC * main]
+            other = [x for x in ex if x not in own]
+            if own:   # eclipses of the system itself off the BLS ephemeris: wrong period or an eccentric orbit
+                tags.append("period_check")
+                r["why"] = f"{r.get('why', '')}; eclipses off this ephemeris at {[x['t'] for x in own[:4]]} (wrong P or eccentric)"
+            if other:
+                tags.append("extra_dips")
+                r["why"] = f"{r.get('why', '')}; extra shallower dips at {[x['t'] for x in other[:4]]}"
+        r["tags"] = tags
+    timed = [r for r in rows if r["class"] in ("planet_candidate", "eb_candidate") and r.get("period_d")
+             and r.get("epoch_btjd") is not None][:a.max_timing]
+    for r in timed:
+        p = run.dir / "deep" / "stages" / "lightcurves" / f"TIC{int(r['tic'])}.json"
+        files = json.loads(p.read_text()).get("files") if p.exists() else None
+        if not files:
+            continue
+        key = f"timing_TIC{r['tic']}_{r['period_d']:.4f}"
+        t = run.cached("classify", key, lambda r=r, files=files: {"ok": True, **{k: v for k, v in timing(
+            r["tic"], r["period_d"], r["epoch_btjd"], r.get("duration_h") or 3.0, r.get("depth_ppm") or 1000,
+            lc_files=files, cache_dir=a.cache_dir).items() if k != "events"}})
+        if t.get("flag"):
+            r["tags"].append("timing_variation")
+            r["why"] = f"{r.get('why', '')}; O-C up to {t['oc_max_min']} min (chi2r {t['chi2_red']})"
+    for r in rows:
+        r["tags"] = ",".join(r["tags"])
+    return rows
 
 
 # ---------------------------------------------------------------- survey loop
@@ -393,7 +475,8 @@ def load_stage(run_dir, stage):
 
 
 def rank_key(r):
-    return (CLASS_ORDER.get(r["class"], 9), 0 if str(r.get("novelty", "")).startswith("new") else 1, -(r.get("snr") or 0))
+    rare = len(set(str(r.get("tags", "")).split(",")) & (RARE - {"long_period"}))
+    return (CLASS_ORDER.get(r["class"], 9), 0 if str(r.get("novelty", "")).startswith("new") else 1, -rare, -(r.get("snr") or 0))
 
 
 def leaderboard(d):
@@ -434,9 +517,10 @@ def write_summary(d, jobs):
                  f"{j.get('n_flagged', '')} | {j.get('n_deep', '')} | {c.get('planet_candidate', '')} | "
                  f"{c.get('duo_candidate', '')} | {c.get('single_transit', '')} | {c.get('eb_candidate', '')} | {j.get('n_variable', '')} |")
     if rows:
-        L += ["", "## Top leads", "", "| # | class | novelty | TIC | CCD | P (d) | depth ppm | SNR | why |", "|---|---|---|---|---|---|---|---|---|"]
+        L += ["", "## Top leads", "", "| # | class | novelty | tags | TIC | CCD | P (d) | depth ppm | SNR | why |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
         for r in rows[:25]:
-            L.append(f"| {r['rank']} | {r['class']} | {r.get('novelty', '')} | {r['tic']} | s{r['sector']}/{r['camera']}/{r['ccd']} | "
+            L.append(f"| {r['rank']} | {r['class']} | {r.get('novelty', '')} | {r.get('tags', '')} | {r['tic']} | s{r['sector']}/{r['camera']}/{r['ccd']} | "
                      f"{_f(r.get('period_d'), 4)} | {_f(r.get('depth_ppm'), 0)} | {_f(r.get('snr'), 1)} | {str(r.get('why', ''))[:70]} |")
     L += ["", f"Full list: `{d / 'leaderboard.csv'}`. Per-CCD detail: `{d}/jobs/<ccd>/deep/summary.md`.", "",
           "Every lead is a hypothesis. \"new\" means not in ExoFOP TOI/CTOI, NASA, Prsa+2022 EBs or Gaia DR3 EB/NSS today. "
@@ -556,7 +640,8 @@ def top(d, n) -> int:
     rows = leaderboard(d)
     for r in rows[:n]:
         p = f"P={r['period_d']:.4f}" if r.get("period_d") else f"t={r.get('epoch_btjd', 0):.2f}"
-        print(f"{r['rank']:3d} {r['class']:16s} {str(r.get('novelty', '')):24s} TIC{r['tic']} s{r['sector']}/{r['camera']}/{r['ccd']} "
+        tg = f" [{r['tags']}]" if r.get("tags") else ""
+        print(f"{r['rank']:3d} {r['class']:16s} {str(r.get('novelty', '')):24s}{tg} TIC{r['tic']} s{r['sector']}/{r['camera']}/{r['ccd']} "
               f"{p} depth={r.get('depth_ppm') or 0:.0f} snr={r.get('snr') or 0:.1f} {str(r.get('why', ''))[:50]}")
     if not rows:
         print("no leads yet")
@@ -578,8 +663,12 @@ def main(argv=None) -> int:
     r.add_argument("--detach", action="store_true")
     r.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 2))
     r.add_argument("--dl-threads", type=int, default=6, help="parallel downloads (MAST throttles at ~12)")
-    r.add_argument("--quick-sectors", type=int, default=1, help="sectors per star in the quick tier (more = deeper, slower)")
-    r.add_argument("--max-deep", type=int, default=150, help="flagged stars per CCD sent to the deep tier")
+    r.add_argument("--profile", choices=["fast", "deep"], default="fast",
+                   help="fast: 1 quick sector, 150 deep stars per CCD. deep: 3 quick sectors, 300 deep stars "
+                        "(~3x the downloads, catches shallower signals)")
+    r.add_argument("--quick-sectors", type=int, help="sectors per star in the quick tier (overrides --profile)")
+    r.add_argument("--max-timing", type=int, default=10, help="planet/EB leads per CCD given the TTV/ETV check")
+    r.add_argument("--max-deep", type=int, help="flagged stars per CCD sent to the deep tier (overrides --profile)")
     r.add_argument("--max-stars", type=int, help="stars per CCD (for trial runs)")
     r.add_argument("--max-veto", type=int, default=15, help="EB and single leads per CCD checked against the catalogs")
     r.add_argument("--eb-snr", type=float, default=12.0)
@@ -597,7 +686,7 @@ def main(argv=None) -> int:
         s.add_argument("--dir", type=Path, required=True)
     rc = sub.add_parser("reclassify", help="re-apply the classify rules to finished CCDs (catalog checks are cached)")
     rc.add_argument("--dir", type=Path, required=True)
-    for k, v in (("max_veto", 15), ("eb_snr", 12.0), ("single_snr", 10.0)):
+    for k, v in (("max_veto", 15), ("eb_snr", 12.0), ("single_snr", 10.0), ("max_timing", 10)):
         rc.add_argument("--" + k.replace("_", "-"), type=type(v), default=v)
     rc.add_argument("--cache-dir", type=Path, default=default_cache_dir())
     t = sub.add_parser("top")
@@ -636,6 +725,9 @@ def main(argv=None) -> int:
         (a.dir / "survey.pid").write_text(str(pr.pid))
         print(f"started pid {pr.pid}; check with: survey status --dir {a.dir}")
         return 0
+    prof = {"fast": (1, 150), "deep": (3, 300)}[a.profile]
+    a.quick_sectors = a.quick_sectors or prof[0]
+    a.max_deep = a.max_deep or prof[1]
     a.cuts = {k: getattr(a, k) for k in CUTS}
     (a.dir / "survey.pid").write_text(str(os.getpid()))
     return run_survey(a)

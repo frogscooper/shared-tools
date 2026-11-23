@@ -100,8 +100,9 @@ def _bls_job(run_dir, cache_dir, tic, files, rstar, rho, pmin, pmax, n_signals, 
                    out_dir=run.dir / "bls" / f"TIC{tic}", grid_oversample=grid_oversample, write_csv=False)
         per = [{k: s.get(k) for k in SIGNAL_KEYS} | {"kind": "periodic"} for s in r["signals"] if s["kind"] == "periodic"]
         singles = [{"epoch_btjd": s["epoch_btjd"], "duration_h": s["duration_h"], "depth_ppm": s["depth_ppm"],
-                    "snr": s["snr"], "sector": s["sector"]} for s in r["signals"] + r["singles_matching_periodic"]
-                   if s["kind"] == "single"]
+                    "snr": s["snr"], "sector": s["sector"], "near_gap_or_edge": s.get("near_gap_or_edge"),
+                    "matches_periodic": s.get("matches_periodic")}
+                   for s in r["signals"] + r["singles_matching_periodic"] if s["kind"] == "single"]
         return {"ok": True, "tic": tic, "rstar": rstar, "rho_solar": rho, "sectors": r["inputs"]["sectors"],
                 "noise_ppm": r["noise_ppm"], "coverage": r["coverage"], "signals": per, "singles": singles,
                 "n_rejected_periodic": len(r["rejected_periodic"]), "json": r["json"]}
