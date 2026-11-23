@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shared-tools"
-version = "0.3.0"
+version = "0.4.0"
 description = "benji's shared agent toolbox. First tools: TESS light-curve fetch, catalog veto, all-sector transit gate."
 requires-python = ">=3.11"
 dependencies = [
@@ -36,6 +36,9 @@ stellar-density = "shared_tools.exo.stellar_density:main"
 cross-star-veto = "shared_tools.exo.cross_star_veto:main"
 duo-solver = "shared_tools.exo.duo_solver:main"
 batch-runner = "shared_tools.exo.batch_runner:main"
+hunt = "shared_tools.exo.hunt:main"
+bls-triage = "shared_tools.exo.bls_triage:main"
+duration-check = "shared_tools.exo.duration_check:main"
 
 [tool.setuptools.packages.find]
 include = ["shared_tools*"]

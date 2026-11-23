@@ -42,6 +42,41 @@ UA = {"User-Agent": "shared-tools tess_lc_fetch (read-only research use)"}
 
 
 # ---------------------------------------------------------------- inventory
+THROTTLE_TRIES = 5
+THROTTLE_BASE_S = 4.0
+
+
+def _throttled(exc) -> float | None:
+    """Seconds to wait if exc looks like MAST throttling or a transient outage (429/503/timeout), else None."""
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    if code in (429, 502, 503, 504):
+        ra = (resp.headers or {}).get("Retry-After") if resp is not None else None
+        try:
+            return float(ra) if ra else THROTTLE_BASE_S
+        except ValueError:
+            return THROTTLE_BASE_S
+    text = f"{type(exc).__name__}: {exc}"
+    if any(k in text for k in ("429", "Too Many Requests", "503", "Service Unavailable", "Timeout", "timed out",
+                               "ConnectionError", "RemoteDisconnected")):
+        return THROTTLE_BASE_S
+    return None
+
+
+def with_backoff(fn, *args, tries=THROTTLE_TRIES, **kw):
+    """Call fn, retrying with exponential backoff (+ jitter) on throttling. Parallel fetchers rely on this."""
+    import random
+
+    for i in range(tries):
+        try:
+            return fn(*args, **kw)
+        except Exception as exc:
+            wait = _throttled(exc)
+            if wait is None or i + 1 == tries:
+                raise
+            time.sleep(wait * (2 ** i) * (0.75 + 0.5 * random.random()))
+
+
 def search_mast(tic: int, authors, kind: str = "lc") -> list[dict]:
     """Live MAST query through lightkurve. kind = 'lc' or 'tpf'. Returns plain dict rows."""
     import lightkurve as lk
@@ -49,7 +84,7 @@ def search_mast(tic: int, authors, kind: str = "lc") -> list[dict]:
     fn = lk.search_lightcurve if kind == "lc" else lk.search_targetpixelfile
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        sr = fn(f"TIC {tic}", mission="TESS", author=list(authors))
+        sr = with_backoff(fn, f"TIC {tic}", mission="TESS", author=list(authors))
     rows = []
     for r in sr.table:
         # Positional searches can return neighbors; keep only this TIC.
@@ -135,13 +170,16 @@ def _download(uri: str, dest: Path, timeout: float = 300) -> None:
     tmp = dest.with_suffix(dest.suffix + ".part")
     tries = [(u, None) for u in [archive_url(uri)] if u] + [(MAST_DOWNLOAD, {"uri": uri})]
     errors = []
+    def get(url, params):
+        with requests.get(url, params=params, headers=UA, stream=True, timeout=timeout) as r:
+            r.raise_for_status()
+            with tmp.open("wb") as f:
+                for chunk in r.iter_content(1 << 16):
+                    f.write(chunk)
+
     for url, params in tries:
         try:
-            with requests.get(url, params=params, headers=UA, stream=True, timeout=timeout) as r:
-                r.raise_for_status()
-                with tmp.open("wb") as f:
-                    for chunk in r.iter_content(1 << 16):
-                        f.write(chunk)
+            with_backoff(get, url, params)
             with fits.open(tmp) as hdul:  # refuse to cache an HTML error page
                 hdul[1].header  # noqa: B018
             tmp.replace(dest)

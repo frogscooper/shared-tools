@@ -251,7 +251,7 @@ def prepare_sectors(secs, period_d, epoch_btjd, dur_d, window_d=None):
 
 # ---------------------------------------------------------------- gate
 def gate(tic, period_d, epoch_btjd, duration_h, depth_ppm=None, claimed_sectors=None,
-         cache_dir=None, lc_files=None, out_dir=None, harmonic_tol=0.05, plot=True) -> dict:
+         cache_dir=None, lc_files=None, out_dir=None, harmonic_tol=0.05, plot=True, rho_solar=None) -> dict:
     tic = parse_tic(tic)
     P, T0, dur_d = float(period_d), float(epoch_btjd), float(duration_h) / 24.0
     claimed = sorted({int(s) for s in claimed_sectors}) if claimed_sectors else None
@@ -374,6 +374,13 @@ def gate(tic, period_d, epoch_btjd, duration_h, depth_ppm=None, claimed_sectors=
                               "ratio_threshold": SECONDARY_RATIO, "phase_0p5": sec, "primary_fold": prim,
                               "strongest_other_phase": max(scan, key=lambda x: x["snr"]) if scan else None}
 
+    # 7. duration vs stellar density (only when a density is given)
+    if rho_solar is not None:
+        from .duration_check import check as duration_check
+
+        dep = (prim.get("depth_ppm") if prim.get("depth_ppm") and prim["depth_ppm"] > 0 else None) or ref or 0.0
+        tests["duration_density"] = duration_check(P, float(duration_h), dep, rho_solar)
+
     fails = [k for k, v in tests.items() if v["result"] == "fail"]
     inc = [k for k, v in tests.items() if v["result"] == "incomplete"]
     if not secs:
@@ -394,6 +401,7 @@ def gate(tic, period_d, epoch_btjd, duration_h, depth_ppm=None, claimed_sectors=
             "odd_even": lambda: f"odd/even differ by {t['diff_sigma']} sigma",
             "depth_consistency": lambda: f"S{t['worst_sector']} E{t['worst_epoch']} depth {t['max_z']} sigma from the rest",
             "secondary": lambda: f"phase-0.5 dip {t['phase_0p5']['depth_ppm']} ppm at SNR {t['phase_0p5']['snr']}",
+            "duration_density": lambda: f"duration {t['flag']}: {t['reason']}",
         }[k]())
     for k in inc:
         reasons.append(f"{k} incomplete: {tests[k].get('reason', 'insufficient data')}")
@@ -402,7 +410,7 @@ def gate(tic, period_d, epoch_btjd, duration_h, depth_ppm=None, claimed_sectors=
     result = {
         "tool": "allsector_gate", "tic": tic, "generated_at": now_et(),
         "inputs": {"period_d": P, "epoch_btjd": T0, "duration_h": duration_h, "depth_ppm": depth_ppm,
-                   "claimed_sectors": claimed},
+                   "claimed_sectors": claimed, "rho_solar": rho_solar},
         "verdict": verdict, "reasons": reasons, "reference_depth_ppm": None if ref is None else round(ref, 1),
         "reference_depth_source": ref_src, "tests": tests,
         "sectors": [{"sector": s["sector"], "author": s["author"], "cadence_s": round(s["cadence_s"], 1),
@@ -417,6 +425,14 @@ def gate(tic, period_d, epoch_btjd, duration_h, depth_ppm=None, claimed_sectors=
     write_json(out_dir / "gate.json", result)
     result["json"] = str(out_dir / "gate.json")
     return result
+
+
+def brief(r) -> str:
+    """One line: verdict, per-test results, first reason, json path. For agents that pay per token."""
+    tt = " ".join(f"{k}={v['result'][0]}" for k, v in r["tests"].items())
+    why = r["reasons"][0] if r["reasons"] else ""
+    why = why if isinstance(why, str) else str(why)
+    return f"TIC{r['tic']} P={r['inputs']['period_d']:.5f} gate={r['verdict']} clean={r['n_clean']}/{r['n_events']} [{tt}] {why[:160]} -> {r['json']}"
 
 
 def make_plot(res, secs, path):
@@ -486,9 +502,15 @@ def main(argv=None) -> int:
     ap.add_argument("--cache-dir", type=Path)
     ap.add_argument("--out-dir", type=Path)
     ap.add_argument("--harmonic-tol", type=float, default=0.05)
+    ap.add_argument("--rho", type=float, help="stellar density (solar); adds the duration_density test")
+    ap.add_argument("--no-plot", action="store_true")
+    ap.add_argument("--brief", action="store_true", help="print one line instead of the JSON summary")
     a = ap.parse_args(argv)
     r = gate(a.tic, a.period, a.epoch, a.duration, a.depth, a.claimed_sectors, a.cache_dir, a.lc_file, a.out_dir,
-             a.harmonic_tol)
+             a.harmonic_tol, plot=not a.no_plot, rho_solar=a.rho)
+    if a.brief:
+        print(brief(r))
+        return 0
     print(json.dumps(jsonable({"tic": r["tic"], "verdict": r["verdict"], "reasons": r["reasons"],
                                "reference_depth_ppm": r["reference_depth_ppm"], "n_events": r["n_events"],
                                "n_clean": r["n_clean"], "sectors": [s["sector"] for s in r["sectors"]],

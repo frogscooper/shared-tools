@@ -134,3 +134,67 @@ def test_live_pi_men(tmp_path):
 def test_live_105755855(tmp_path):
     r = cv.veto(105755855, cache_dir=tmp_path)
     assert not (r["flags"]["toi"] or r["flags"]["ctoi"] or r["flags"]["eb"])
+
+
+# ---------------------------------------------------------------- Gaia DR3 non-single stars (via VizieR)
+def nss_tsv(rows):
+    """Minimal multi-table ASU-TSV like VizieR returns for -source=I/357."""
+    out = ["#RESOURCE=yCat_1357", "#INFO\tok", "#Name: I/357/tboeb", "#Title: eb", "#Name: I/357/tbosb2", "#Title: sb2"]
+    if rows:
+        out += ["_r\tSource\tNSSmodel\tPer\tecc", "arcsec\t \t \td\t ", "------\t-------\t----\t----\t----"]
+        out += ["\t".join(map(str, r)) for r in rows]
+    out += ["#Name: I/357/tbooc", "#Title: orbital"]
+    return "\n".join(out) + "\n"
+
+
+def gaia_tsv(sid, ra, dec, ruwe):
+    return ("#RESOURCE=yCat_1355\n#INFO\tok\n#Name: I/355/gaiadr3\n#Title: x\n"
+            "_r\tSource\tRA_ICRS\tDE_ICRS\tpmRA\tpmDE\tGmag\tPlx\tRUWE\n \t \tdeg\tdeg\t \t \t \t \t \n-\t-\t-\t-\t-\t-\t-\t-\t-\n"
+            f"0.3\t{sid}\t{ra}\t{dec}\t-15.6\t26.0\t10.077\t5.69\t{ruwe}\n")
+
+
+def nss_router(fixtures, nss_rows, ruwe=0.97, gaia_down=False):
+    header = (fixtures / "nasa_wasp62.csv").read_text().splitlines()[0] + "\n"
+    base = make_router(fixtures, nasa=FakeResp(header))  # not a known planet
+
+    def fake(method, url, headers=None, timeout=None, params=None, data=None, **kw):
+        if "vizier" in url and params and params.get("-source") == "I/357":
+            return FakeResp(nss_tsv(nss_rows))
+        if "vizier" in url and params and params.get("-source") == "I/355/gaiadr3":
+            return FakeResp(gaia_tsv(WASP62["gaia_dr2_id"], WASP62["ra"], WASP62["dec"], ruwe))
+        if "vizier" in url and params and params.get("-source") == "I/358/veb":
+            return FakeResp("#RESOURCE=yCat_1358\n#INFO\tok\n#Name: I/358/veb\n#Title: x\n")
+        if gaia_down and "gea.esac" in url:
+            return FakeResp("<html><title>Gaia archive down for DR4</title></html>", 503)
+        return base(method, url, headers=headers, timeout=timeout, params=params, data=data, **kw)
+    return fake
+
+
+def test_parse_vizier_multi_keeps_only_tables_with_rows():
+    tabs = cv.parse_vizier_multi(nss_tsv([(0.38, 1097717538333601408, "SB2", 44.9559, 0.413)]))
+    assert [t for t, _ in tabs] == ["I/357/tbosb2"]
+    assert tabs[0][1]["NSSmodel"].iloc[0] == "SB2"
+
+
+def test_nss_sb2_target_is_known_object(monkeypatch, offline, fixtures):
+    rows = [(0.38, WASP62["gaia_dr2_id"], "SB2", 44.9559, 0.413), (0.38, WASP62["gaia_dr2_id"], "Orbital", 44.9229, 0.371)]
+    r = run(monkeypatch, nss_router(fixtures, rows, ruwe=3.63), offline, tic=999, period_d=44.96, epoch_btjd=3000.0)
+    assert r["flags"]["nss_binary"] and r["flags"]["nss_orbit"] and r["flags"]["high_ruwe"]
+    assert r["summary"]["verdict"] == "known_object"
+    assert any(a["source"] == "gaia_dr3_nss" for a in r["period_aliases"])
+
+
+def test_nss_sb1_only_notes_companion(monkeypatch, offline, fixtures):
+    rows = [(0.38, WASP62["gaia_dr2_id"], "SB1", 812.0, 0.2)]
+    r = run(monkeypatch, nss_router(fixtures, rows), offline, tic=999)
+    assert r["flags"]["nss_orbit"] and not r["flags"]["nss_binary"] and not r["flags"]["high_ruwe"]
+    assert r["summary"]["verdict"] == "clean"
+    assert any("non-single-star" in n for n in r["summary"]["notes"])
+
+
+def test_gaia_archive_down_falls_back_to_vizier(monkeypatch, offline, fixtures):
+    r = run(monkeypatch, nss_router(fixtures, [], gaia_down=True), offline, tic=999)
+    assert r["sources"]["gaia_dr3_neighbors"]["status"] == "ok"
+    assert any(m["is_target"] for m in r["sources"]["gaia_dr3_neighbors"]["matches"])
+    assert r["sources"]["gaia_dr3_eb"]["status"] == "empty"
+    assert r["summary"]["verdict"] == "clean"

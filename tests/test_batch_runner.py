@@ -27,6 +27,28 @@ def test_match_pairs_needs_years_and_similar_shape():
     assert {(x["t1"], x["t2"]) for x in br.match_pairs(dips, sector=7)} == {(1100, 1710)}
 
 
+def test_merge_fragments_keeps_strongest_dip_of_one_eclipse():
+    # TIC 99725941-like: one long eclipse reported as a core and two wings, then a real dip years later
+    dips = [{"tic": 1, "sector": 5, "t0_btjd": 1000.00, "duration_h": 8, "depth_ppm": 9000, "snr": 40},
+            {"tic": 1, "sector": 5, "t0_btjd": 999.75, "duration_h": 4, "depth_ppm": 4000, "snr": 12},
+            {"tic": 1, "sector": 5, "t0_btjd": 1000.28, "duration_h": 4, "depth_ppm": 4500, "snr": 11},
+            {"tic": 2, "sector": 5, "t0_btjd": 1000.10, "duration_h": 4, "depth_ppm": 4500, "snr": 11},   # other star: kept
+            {"tic": 1, "sector": 48, "t0_btjd": 1800.00, "duration_h": 8, "depth_ppm": 8800, "snr": 30}]
+    kept, frags = br.merge_fragments(dips)
+    assert sorted((d["tic"], d["t0_btjd"]) for d in kept) == [(1, 1000.0), (1, 1800.0), (2, 1000.1)]
+    assert {f["fragment_of"] for f in frags} == {1000.0}
+    # without merging, the wings pair with the late dip; with it, one pair remains
+    assert len(br.match_pairs([d for d in dips if d["tic"] == 1])) > 1
+    assert len(br.match_pairs([d for d in kept if d["tic"] == 1])) == 1
+
+
+def test_match_pairs_skips_eb_sized_pairs():
+    dips = [{"t0_btjd": 1000, "sector": 5, "depth_ppm": 200000, "duration_h": 6, "snr": 90},
+            {"t0_btjd": 1800, "sector": 48, "depth_ppm": 210000, "duration_h": 6, "snr": 90}]
+    assert len(br.match_pairs(dips)) == 1                       # no radius known: kept
+    assert br.match_pairs(dips, rstar_rsun=1.0) == []           # 20% deep on a Sun: ~50 Re
+
+
 def test_cached_stage_is_not_recomputed(tmp_path):
     run = br.Run(tmp_path)
     calls = []

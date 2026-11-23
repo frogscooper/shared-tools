@@ -23,6 +23,12 @@ are controls only.
 | `duo-solver` | Two single transits: list the allowed periods P = ΔT/n, drop every alias the measured coverage rules out, and run the duo gate. | [docs/duo_solver.md](docs/duo_solver.md) |
 | `batch-runner` | Resumable duo funnel over TICs or one sector/camera/CCD, with a funnel CSV and a known-duo control. | [docs/batch_runner.md](docs/batch_runner.md) |
 | `stellar-density` | rho* = 3π/(G P²)(a/Rs)³ in cgs, compared with the TIC M/R³. | [docs/stellar_density.md](docs/stellar_density.md) |
+| `duration-check` | Is this T14 possible for the star's density, period and depth? Flags grazing (likely EB) and too-long transits. | [docs/duration_check.md](docs/duration_check.md) |
+| `bls-triage` | The CCD-wide BLS cuts (SNR, transits, odd/even, dominance, harmonics, integer days, radius, grid edge, duration, shared-epoch systematics) → survivors and near misses. | [docs/bls_triage.md](docs/bls_triage.md) |
+| `hunt` | **One resumable command per CCD**: controls → select → parallel fetch → duo funnel → BLS → triage → gate → vet → `summary.md` + hunt-log draft. Time-boxed chunks or `--detach`. | [docs/hunt.md](docs/hunt.md) |
+
+**Whole CCD:** `hunt run --sector 74 --camera 1 --ccd 2 --run-dir runs/s74_c1_d2` (rerun until exit 0, or add `--detach`),
+then read `runs/s74_c1_d2/summary.md`. The steps below are what `hunt` runs for you.
 
 Typical flow for periodic signals: `transit-search`, then `catalog-veto`, then `allsector-gate`, then `candidate-packet`.
 Typical flow for long-period duos: `batch-runner` does select, coverage, light curves, masks and dips, `cross-star-veto`,
@@ -45,7 +51,17 @@ cross-star-veto --dips tests/fixtures/hunter_overnight_dips.csv --tol 1.0 --max-
 duo-solver 232608943 --t1 1785.96 --t2 2751.5986 --duration 10.85 --depth 12000 --pmin 10 --rho 1.45
 candidate-packet 232608943 --t1 1785.96 --t2 2751.5986 --duration 10.85 --depth 12000 --tpf-sectors 17,53
 batch-runner --control toi4600c --run-dir runs/control_toi4600c
+duration-check 10.4317 --t14 1.2 --depth 1370 --rho 0.78
+hunt run --sector 74 --camera 1 --ccd 2 --run-dir runs/s74_c1_d2 --detach && hunt status --run-dir runs/s74_c1_d2
 ```
+
+What changed in 0.4.0 (from the 21 Nov S74/1/2 hunt's tool-issue list):
+1. Duo: dips within 1× duration of a stronger dip are merged before pairing (wing fragments of one eclipse no longer pair). Pairs implying Rp > 25 Re are skipped.
+2. Duo: one pair labelled periodic demotes all of that star's pairs, and no packets are built for them.
+3. `catalog-veto`: Gaia DR3 non-single-star solutions (all I/357 tables, one VizieR call) and target RUWE. SB2 / EB models veto (`nss_binary`). Other orbits and RUWE > 1.4 add a note. Gaia cones fall back to the VizieR mirror when the Gaia archive is down (DR4 downtime from 25 Nov 2026).
+4. `duration-check`, plus the `allsector-gate --rho` `duration_density` test.
+5. `transit-search`: per-period-band duration grids (up to 12 h at long P, no longer capped at 4 h), coarser coarse-search phase bins, period-grid oversample 2. That's about 1.8× faster with better long-duration SNR. Signals carry `duration_at_grid_edge`. `--brief`.
+6. Speed: `hunt` parallelizes downloads (threads, MAST 429/503 backoff in `tess_lc_fetch`) and CPU stages (processes), and works within a time budget. `allsector-gate --brief`.
 
 Cache: `$SHARED_TOOLS_CACHE` (default `~/.cache/shared_tools`). Re-running any tool reuses
 the cache, so a second `tess-lc-fetch` downloads nothing and returns the same `manifest_hash`.

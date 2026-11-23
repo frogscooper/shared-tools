@@ -28,7 +28,10 @@ from .allsector_gate import load_sectors, prepare_sectors, robust_std
 from .common import default_cache_dir, jsonable, now_et, parse_tic, write_json
 from .harmonics import period_harmonic_flag
 
-DURATIONS_H = (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0)
+DURATIONS_H = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0)
+BAND_FACTOR = 4.0           # period bands [p, 4p): each gets its own duration set, grid spacing and binning
+RHO_RANGE = (0.25, 8.0)     # solar; F dwarfs to mid-M dwarfs. Sets the physical duration range per band
+MAX_BIN_MIN = 30.0
 SINGLE_DURATIONS_H = (2.0, 4.0, 6.0, 8.0, 12.0, 16.0)
 SEASON_GAP_D = 100.0
 CSV_COLS = ["rank", "kind", "status", "period_d", "epoch_btjd", "depth_ppm", "depth_err_ppm", "duration_h", "snr", "sde",
@@ -73,13 +76,55 @@ def period_grid(pmin, pmax, baseline, dur_min_d, oversample=3):
     return pmin * r ** np.arange(n + 1)
 
 
-def bls_run(t, f, e, periods, durations_d):
+def duration_bands(pmin, pmax, factor=BAND_FACTOR, grid_h=DURATIONS_H, rho_range=RHO_RANGE):
+    """[(p_lo, p_hi, durations_d)]: per band, the grid durations a circular transit can have on a dwarf.
+
+    The longest duration is 1.3x T14 at b=0 for the least dense star at the band's top period (so
+    wide variability and low-density hosts are not pinned to one grid edge), the shortest stays at the
+    grid minimum (grazing and high-b transits are short), and every duration is < half the band's
+    shortest period (astropy BLS requirement). Before this, one duration set capped at 4 h for pmin 0.5 d.
+    """
+    from .stellar_density import expected_duration_h
+
+    edges = [pmin]
+    while edges[-1] * factor < pmax * 0.999:
+        edges.append(edges[-1] * factor)
+    edges.append(pmax)
+    out = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        dmax_h = 1.3 * expected_duration_h(hi, rho_range[0], 0.1)
+        top = next((g for g in grid_h if g >= dmax_h), grid_h[-1])
+        durs = [g for g in grid_h if g <= top and g / 24 < 0.5 * lo]
+        if not durs:
+            durs = [g for g in grid_h if g / 24 < 0.5 * lo][:1] or [min(grid_h[0], 0.4 * lo * 24)]
+        out.append((lo, hi, np.array(durs) / 24))
+    return out
+
+
+def rebin(t, f, e, sec, bin_min):
+    """Coarser bins (per sector) of already-binned arrays, inverse-variance weighted."""
+    if len(t) == 0:
+        return t, f, e, sec
+    key = sec.astype(np.int64) * 10 ** 7 + np.floor((t - t.min()) / (bin_min / 1440.0)).astype(np.int64)
+    _, idx = np.unique(key, return_inverse=True)
+    w = 1 / e ** 2
+    sw = np.bincount(idx, w)
+    return (np.bincount(idx, w * t) / sw, np.bincount(idx, w * f) / sw, 1 / np.sqrt(sw),
+            np.bincount(idx, sec) / np.bincount(idx))
+
+
+SEARCH_PHASE_OVERSAMPLE = 4   # phase bins per shortest duration in the coarse search (astropy default 10)
+REFINE_OVERSAMPLE = 6         # the +-0.5% refine window is small, so it can afford a fine grid
+SEARCH_PERIOD_OVERSAMPLE = 2  # period-grid points per (shortest duration / baseline); refine() re-fits the peak
+
+
+def bls_run(t, f, e, periods, durations_d, phase_oversample=10):
     from astropy.timeseries import BoxLeastSquares
 
     bls = BoxLeastSquares(t, f, dy=e)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        res = bls.power(periods, durations_d, objective="snr")
+        res = bls.power(periods, durations_d, objective="snr", oversample=phase_oversample)
     return bls, res
 
 
@@ -89,8 +134,9 @@ def sde(power):
 
 
 # ---------------------------------------------------------------- periodic search
-def periodic_search(t, f, e, sec, pmin, pmax, n_signals=3, min_transits=2, oversample=3):
-    durs = np.array([d for d in DURATIONS_H if d / 24 < 0.5 * pmin]) / 24
+def periodic_search(t, f, e, sec, pmin, pmax, n_signals=3, min_transits=2, oversample=None, bands=None):
+    oversample = oversample or SEARCH_PERIOD_OVERSAMPLE
+    bands = bands or duration_bands(pmin, pmax)
     found, mask = [], np.ones(len(t), bool)
     # rejected peaks (single events, artifacts) are masked and do not use up one of the n_signals slots
     for _ in range(n_signals + 5):
@@ -100,22 +146,39 @@ def periodic_search(t, f, e, sec, pmin, pmax, n_signals=3, min_transits=2, overs
         for a, b in seasons(t[mask], sec[mask]):
             m = mask & (t >= a) & (t <= b)
             base = b - a
-            pmax_s = min(pmax, base / min_transits)
-            if pmax_s <= pmin or m.sum() < 100:
+            if m.sum() < 100:
                 continue
-            P = period_grid(pmin, pmax_s, base, durs.min(), oversample)
-            _, res = bls_run(t[m], f[m], e[m], P, durs)
-            z = sde(res.power)
-            i = int(np.argmax(res.power))
-            peaks.append({"period": float(res.period[i]), "sde": float(z[i]), "season": (float(a), float(b))})
+            for bi, (lo, hi, durs) in enumerate(bands):
+                pmax_s = min(hi, base / min_transits)
+                if pmax_s <= lo:
+                    continue
+                # bins no wider than a quarter of the shortest duration searched in this band
+                bmin = min(MAX_BIN_MIN, 0.25 * durs.min() * 1440)
+                tb, fb, eb, sb = rebin(t[m], f[m], e[m], sec[m], bmin) if bmin > np.median(np.diff(t[m])) * 1440 * 1.5 \
+                    else (t[m], f[m], e[m], sec[m])
+                P = period_grid(lo, pmax_s, base, durs.min(), oversample)
+                _, res = bls_run(tb, fb, eb, P, durs, SEARCH_PHASE_OVERSAMPLE)
+                z = sde(res.power)
+                i = int(np.argmax(res.power))
+                peaks.append({"period": float(res.period[i]), "sde": float(z[i]), "power": float(res.power[i]),
+                              "season": (float(a), float(b)), "band": bi})
         if not peaks:
             break
-        # cluster season peaks by period (0.5%) and pick the cluster seen in most seasons, then highest SDE
-        best = max(peaks, key=lambda p: (sum(abs(q["period"] / p["period"] - 1) < 0.005 for q in peaks), p["sde"]))
+        # best band per season by BLS SNR power, then cluster season peaks by period (0.5%) and pick the
+        # cluster seen in most seasons, then the highest power
+        by_season = {}
+        for p in peaks:
+            if p["season"] not in by_season or p["power"] > by_season[p["season"]]["power"]:
+                by_season[p["season"]] = p
+        peaks = list(by_season.values())
+        best = max(peaks, key=lambda p: (sum(abs(q["period"] / p["period"] - 1) < 0.005 for q in peaks), p["power"]))
         members = [q for q in peaks if abs(q["period"] / best["period"] - 1) < 0.005]
-        sig = refine(t[mask], f[mask], e[mask], best["period"], durs, oversample)
+        durs = bands[best["band"]][2]
+        sig = refine(t[mask], f[mask], e[mask], best["period"], durs, REFINE_OVERSAMPLE)
         sig.update(n_seasons=len(members), sde=round(max(q["sde"] for q in members), 2),
-                   season_sde=[round(q["sde"], 2) for q in members])
+                   season_sde=[round(q["sde"], 2) for q in members],
+                   dur_grid_h=[round(d * 24, 2) for d in durs])
+        sig["duration_at_grid_edge"] = bool(sig["duration_h"] >= durs.max() * 24 - 1e-6)
         # a "periodic" peak built from fewer than min_transits events is a single dip or an artifact
         sig["rejected"] = (f"only {sig['n_transits']} transit(s) with data" if sig["n_transits"] < min_transits else
                            f"one event carries {sig['top_event_power_frac']:.0%} of the signal" if sig["top_event_power_frac"] > 0.6
@@ -197,8 +260,17 @@ def single_transits(t, f, sec, snr_min=7.0, durations_h=SINGLE_DURATIONS_H):
 
 
 # ---------------------------------------------------------------- main
+def coverage(t, gap_d=0.5):
+    """Merged [start, end] data stretches (BTJD), so later steps can tell which epochs had data."""
+    t = np.sort(t)
+    if len(t) == 0:
+        return []
+    cut = np.where(np.diff(t) > gap_d)[0]
+    return [[round(float(a), 4), round(float(b), 4)] for a, b in zip(np.r_[t[0], t[cut + 1]], np.r_[t[cut], t[-1]])]
+
+
 def search(tic, sectors=None, lc_files=None, cache_dir=None, pmin=1.0, pmax=None, n_signals=3, single_snr=7.0,
-           window_d=1.0, bin_min=10.0, out_dir=None) -> dict:
+           window_d=1.0, bin_min=10.0, out_dir=None, grid_oversample=None, write_csv=True) -> dict:
     tic = parse_tic(tic)
     secs, load = load_sectors(tic, cache_dir, lc_files)
     if sectors:
@@ -208,7 +280,7 @@ def search(tic, sectors=None, lc_files=None, cache_dir=None, pmin=1.0, pmax=None
     prepare_sectors(secs, None, 0.0, 0.0, window_d=window_d)
     t, f, e, sec = binned_flat(secs, bin_min)
     pmax = pmax or max(pmin * 2, min(100.0, max(b - a for a, b in seasons(t, sec)) / 2))
-    periodic = periodic_search(t, f, e, sec, pmin, pmax, n_signals)
+    periodic = periodic_search(t, f, e, sec, pmin, pmax, n_signals, oversample=grid_oversample)
     singles = single_transits(t, f, sec, single_snr)
     for s in singles:
         s["matches_periodic"] = None
@@ -237,18 +309,21 @@ def search(tic, sectors=None, lc_files=None, cache_dir=None, pmin=1.0, pmax=None
     result = {"tool": "transit_search", "tic": tic, "generated_at": now_et(),
               "inputs": {"sectors": [s["sector"] for s in secs], "pmin": pmin, "pmax": round(pmax, 3),
                          "n_signals": n_signals, "single_snr": single_snr, "window_d": window_d, "bin_min": bin_min},
-              "n_points_binned": int(len(t)), "signals": signals,
+              "n_points_binned": int(len(t)), "coverage": coverage(t), "noise_ppm": round(float(robust_std(f)) * 1e6, 1),
+              "signals": signals,
               "singles_matching_periodic": [s for s in singles if s["matches_periodic"]],
               "rejected_periodic": rejected, "load": load,
               "note": "Search output only. Every signal is unpromoted until allsector_gate has run; no detection is claimed."}
     out_dir = Path(out_dir or Path(cache_dir or default_cache_dir()) / "transit_search" / f"TIC{tic}")
     write_json(out_dir / "signals.json", result)
-    with (out_dir / "signals.csv").open("w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["tic"] + CSV_COLS, extrasaction="ignore")
-        w.writeheader()
-        for s in signals:
-            w.writerow(jsonable({"tic": tic, **s, "tess_orbit_flag": s.get("tess_orbit_flag") and json.dumps(s["tess_orbit_flag"])}))
-    result["json"], result["csv"] = str(out_dir / "signals.json"), str(out_dir / "signals.csv")
+    result["json"], result["csv"] = str(out_dir / "signals.json"), None
+    if write_csv:
+        with (out_dir / "signals.csv").open("w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=["tic"] + CSV_COLS, extrasaction="ignore")
+            w.writeheader()
+            for s in signals:
+                w.writerow(jsonable({"tic": tic, **s, "tess_orbit_flag": s.get("tess_orbit_flag") and json.dumps(s["tess_orbit_flag"])}))
+        result["csv"] = str(out_dir / "signals.csv")
     return result
 
 
@@ -265,9 +340,18 @@ def main(argv=None) -> int:
     ap.add_argument("--bin-min", type=float, default=10.0)
     ap.add_argument("--cache-dir", type=Path)
     ap.add_argument("--out-dir", type=Path)
+    ap.add_argument("--grid-oversample", type=float, help=f"coarse period-grid density (default {SEARCH_PERIOD_OVERSAMPLE}; "
+                                                          "3 is slower and slightly more sensitive to short transits at long P)")
+    ap.add_argument("--brief", action="store_true", help="one line per periodic signal")
     a = ap.parse_args(argv)
     r = search(a.tic, a.sectors, a.lc_file, a.cache_dir, a.pmin, a.pmax, a.n_signals, a.single_snr, a.window, a.bin_min,
-               a.out_dir)
+               a.out_dir, a.grid_oversample)
+    if a.brief:
+        for s in [x for x in r["signals"] if x["kind"] == "periodic"]:
+            print(f"TIC{r['tic']} P={s['period_d']} T0={s['epoch_btjd']} dur={s['duration_h']}h depth={s['depth_ppm']} "
+                  f"snr={s['snr']} ntr={s['n_transits']} oe={s['odd_even_sigma']} edge={s['duration_at_grid_edge']}")
+        print(f"singles={sum(1 for x in r['signals'] if x['kind'] == 'single')} json={r['json']}")
+        return 0
     print(json.dumps(jsonable({"tic": r["tic"], "inputs": r["inputs"], "json": r["json"], "csv": r["csv"],
                                "signals": [{k: s.get(k) for k in ["rank"] + CSV_COLS[1:]} for s in r["signals"][:10]]}),
                      indent=2))

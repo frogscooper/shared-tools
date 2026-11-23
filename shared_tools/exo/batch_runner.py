@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 import traceback
 from pathlib import Path
 
@@ -48,11 +49,16 @@ MIN_STARS_FOR_VETO = 10
 
 
 # ---------------------------------------------------------------- helpers
+class Deferred(Exception):
+    """The run's time budget ran out before this stage item started. Re-run to continue (all work is cached)."""
+
+
 class Run:
-    def __init__(self, run_dir: Path, redo=(), cache_dir=None):
+    def __init__(self, run_dir: Path, redo=(), cache_dir=None, deadline=None):
         self.dir = Path(run_dir)
         self.redo = set(redo or ())
         self.cache_dir = Path(cache_dir or default_cache_dir())
+        self.deadline = deadline          # time.time() after which no new (uncached) work starts
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def path(self, stage, key):
@@ -63,6 +69,8 @@ class Run:
         p = self.path(stage, key)
         if p.exists() and stage not in self.redo:
             return json.loads(p.read_text())
+        if self.deadline is not None and time.time() > self.deadline:
+            raise Deferred(f"{stage}/{key}")
         try:
             out = fn()
         except Exception as exc:  # noqa: BLE001 - one star must not kill the run; the error is the result
@@ -203,7 +211,30 @@ def stage_dips(run, tic, files, snr_min):
     return run.cached("dips", f"TIC{tic}", work)
 
 
-def match_pairs(dips, sector=None, min_dt=200.0, max_pairs=20):
+FRAGMENT_TOL = 1.0   # dips closer than this many durations to a stronger dip are fragments of it
+RP_MAX_RE = 25.0     # pairs implying a bigger body than this (sqrt(depth) * R*) are EB-sized, not paired
+RSUN_RE = 109.08
+
+
+def merge_fragments(dips, tol=FRAGMENT_TOL):
+    """Drop dips that sit within tol x duration of a stronger dip on the same star.
+
+    The box finder can report the two wings of one long eclipse as separate dips, and two
+    wings from one event then pair up and pass the duo gate (TIC 99725941 in S74). The
+    strongest dip keeps the event; the others are returned as fragments.
+    """
+    kept, frags = [], []
+    for d in sorted(dips, key=lambda x: -x["snr"]):
+        host = next((k for k in kept if int(k.get("tic", 0)) == int(d.get("tic", 0)) and
+                     abs(d["t0_btjd"] - k["t0_btjd"]) <= tol * max(d["duration_h"], k["duration_h"]) / 24), None)
+        if host is None:
+            kept.append(d)
+        else:
+            frags.append({**d, "fragment_of": host["t0_btjd"]})
+    return sorted(kept, key=lambda x: x["t0_btjd"]), frags
+
+
+def match_pairs(dips, sector=None, min_dt=200.0, max_pairs=20, rstar_rsun=None, rp_max_re=RP_MAX_RE):
     d = sorted(dips, key=lambda x: x["t0_btjd"])
     pairs = []
     for i, a in enumerate(d):
@@ -214,6 +245,9 @@ def match_pairs(dips, sector=None, min_dt=200.0, max_pairs=20):
                 continue
             rd = b["depth_ppm"] / a["depth_ppm"] if a["depth_ppm"] > 0 else np.inf
             rw = b["duration_h"] / a["duration_h"]
+            if rstar_rsun and np.isfinite(rstar_rsun) and rp_max_re and \
+                    np.sqrt(max(a["depth_ppm"], b["depth_ppm"]) * 1e-6) * rstar_rsun * RSUN_RE > rp_max_re:
+                continue
             if 0.5 <= rd <= 2 and 0.5 <= rw <= 2:
                 pairs.append({"t1": a["t0_btjd"], "t2": b["t0_btjd"], "s1": a["sector"], "s2": b["sector"],
                               "depth_ppm": round(float(np.sqrt(a["depth_ppm"] * b["depth_ppm"])), 1),
@@ -223,8 +257,10 @@ def match_pairs(dips, sector=None, min_dt=200.0, max_pairs=20):
 
 
 def run_batch(run_dir, tics=None, sector=None, camera=None, ccd=None, cuts=None, known_filter=True, max_stars=None,
-              control=None, snr_min=7.0, pmin=10.0, tol_d=0.5, max_veto_stars=2, redo=(), cache_dir=None, packets=True):
-    run = Run(run_dir, redo, cache_dir)
+              control=None, snr_min=7.0, pmin=10.0, tol_d=0.5, max_veto_stars=2, redo=(), cache_dir=None, packets=True,
+              deadline=None, pair_sector_rule=True):
+    """pair_sector_rule=False pairs dips from any sectors (one pass instead of two) and labels each pair in_sector."""
+    run = Run(run_dir, redo, cache_dir, deadline)
     controls = [CONTROLS[c] for c in (control or [])]
     tics = sorted(set(list(tics or []) + [c["tic"] for c in controls])) if (tics or controls) else None
     funnel = {"run_dir": str(run.dir), "started_at": now_et()}
@@ -269,10 +305,19 @@ def run_batch(run_dir, tics=None, sector=None, camera=None, ccd=None, cuts=None,
     funnel["n_dips_after_veto"] = len(kept)
     funnel["veto_note"] = veto.get("skipped", "")
 
+    rstar = {int(s["tic"]): s.get("rstar") for s in stars}
     pairs = {}
     for t in ok:
         mine = [d for d in kept if int(d["tic"]) == int(t)]
-        pairs[t] = run.cached("pairs", f"TIC{t}", lambda mine=mine: {"ok": True, "pairs": match_pairs(mine, sector)})
+
+        def pair_work(mine=mine, t=t):
+            merged, frags = merge_fragments(mine)
+            pp = match_pairs(merged, sector if pair_sector_rule else None, rstar_rsun=rstar.get(int(t)))
+            for x in pp:
+                x["in_sector"] = sector is None or sector in (x["s1"], x["s2"])
+            return {"ok": True, "pairs": pp, "n_fragments_merged": len(frags), "fragments": frags}
+        pairs[t] = run.cached("pairs", f"TIC{t}" if pair_sector_rule else f"TIC{t}_anysector", pair_work)
+    funnel["n_dip_fragments_merged"] = sum(p.get("n_fragments_merged", 0) for p in pairs.values())
     funnel["n_pairs"] = sum(len(p["pairs"]) for p in pairs.values())
     funnel["n_stars_with_pairs"] = sum(1 for p in pairs.values() if p["pairs"])
 
@@ -296,8 +341,15 @@ def run_batch(run_dir, tics=None, sector=None, camera=None, ccd=None, cuts=None,
             duo_rows.append({"tic": t, **p, **{k: r.get(k) for k in ("ok", "verdict", "label_kind", "surviving_periods",
                                                                      "n_excluded", "label", "error")}})
     funnel["n_duo_solved"] = sum(1 for r in duo_rows if r["ok"])
-    passed = [r for r in duo_rows if r.get("verdict") == "pass" and r.get("label_kind") == "duo"]
-    funnel["n_duo_gate_pass"] = len(passed)
+    # one pair shown to be periodic (a third dip seen) makes the star periodic: demote its other pairs
+    periodic_stars = {int(r["tic"]) for r in duo_rows if r.get("label_kind") == "periodic"}
+    for r in duo_rows:
+        r["star_periodic"] = int(r["tic"]) in periodic_stars
+    gate_pass = [r for r in duo_rows if r.get("verdict") == "pass" and r.get("label_kind") == "duo"]
+    passed = [r for r in gate_pass if not r["star_periodic"]]
+    funnel["n_duo_gate_pass"] = len(gate_pass)
+    funnel["n_demoted_star_periodic"] = len(gate_pass) - len(passed)
+    funnel["n_duo_gate_pass_after_demotion"] = len(passed)
 
     pk = []
     if packets:

@@ -199,7 +199,8 @@ def build(tic, signal: dict, cache_dir=None, lc_files=None, tpf_sectors=None, tp
     notes, sub = [], {}
 
     # 1. gate (also gives per-event depths for the zooms)
-    g = gate(tic, P, T0, dur_h, signal.get("depth_ppm"), claimed_sectors, cache_dir, lc_files, d / "_gate")
+    g = gate(tic, P, T0, dur_h, signal.get("depth_ppm"), claimed_sectors, cache_dir, lc_files, d / "_gate",
+             rho_solar=signal.get("rho_solar"))
     shutil.copy(g["plot"], d / "gate.png")
     sub["allsector_gate"] = {"verdict": g["verdict"], "reasons": g["reasons"],
                              "tests": {k: v["result"] for k, v in g["tests"].items()}, "json": g["json"]}

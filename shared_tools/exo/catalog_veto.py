@@ -205,12 +205,105 @@ def _cone(table_sql: str, cols: str, ra: float, dec: float, radius_arcsec: float
     r = (radius_arcsec + POS_MARGIN_ARCSEC) / 3600.0
     adql = (f"SELECT {cols} FROM {table_sql} WHERE 1=CONTAINS(POINT('ICRS', g.ra, g.dec), "
             f"CIRCLE('ICRS', {ra}, {dec}, {r}))")
-    df = gaia_tap(adql)
+    try:
+        df = gaia_tap(adql)
+    except SourceDown as exc:  # Gaia archive down (e.g. DR4 downtime): same table from the VizieR mirror
+        try:
+            return _cone_vizier(table_sql, ra, dec, radius_arcsec)
+        except SourceDown as exc2:
+            raise SourceDown(f"Gaia TAP: {exc}; VizieR mirror: {exc2}") from exc2
     if df.empty:
         return df
     df["source_id"] = df["source_id"].astype("int64")
     df["sep_arcsec"] = _sep_j2000(df, ra, dec)
     return df[df["sep_arcsec"] <= radius_arcsec].sort_values("sep_arcsec").reset_index(drop=True)
+
+
+VIZIER_GAIA = {  # VizieR mirrors of the Gaia DR3 tables (used when the Gaia archive is down, e.g. DR4 downtime)
+    "gaiadr3.gaia_source": ("I/355/gaiadr3", {"Source": "source_id", "RA_ICRS": "ra", "DE_ICRS": "dec", "pmRA": "pmra",
+                                              "pmDE": "pmdec", "Gmag": "phot_g_mean_mag", "Plx": "parallax",
+                                              "RUWE": "ruwe"}),
+    "gaiadr3.vari_eclipsing_binary": ("I/358/veb", {"Source": "source_id", "Freq": "frequency", "RA_ICRS": "ra",
+                                                    "DE_ICRS": "dec"}),
+}
+NSS_CATALOG = "I/357"            # Gaia DR3 non-single stars: every nss_two_body_orbit model + acceleration + trends
+NSS_BINARY_MODELS = ("SB2", "EclipsingBinary", "EclipsingSpectro")   # models that by themselves mean "binary star"
+RUWE_HIGH = 1.4
+
+
+def parse_vizier_multi(text: str) -> list[tuple[str, pd.DataFrame]]:
+    """ASU-TSV with several #Table blocks -> [(table name, DataFrame)] (empty tables dropped)."""
+    if "#INFO" not in text and "#RESOURCE" not in text:
+        raise SourceDown(f"VizieR response is not ASU-TSV: {text[:200]!r}")
+    bad = [l for l in text.splitlines() if l.startswith("#***") or (l.startswith("#INFO") and "rror" in l)]
+    if bad:
+        raise SourceDown("VizieR reported an error: " + " | ".join(bad)[:400])
+    out, name, block = [], None, []
+
+    def flush():
+        lines = [l for l in block if l and not l.startswith("#")]
+        if name and len(lines) >= 4:
+            header = lines[0].split("\t")
+            out.append((name, pd.DataFrame([l.split("\t") for l in lines[3:]], columns=header).apply(lambda c: c.str.strip())))
+    for line in text.splitlines():
+        if line.startswith("#Name: "):
+            flush()
+            name, block = line[7:].strip(), []
+        else:
+            block.append(line)
+    flush()
+    return out
+
+
+def vizier_cone(catalog: str, cols: list[str], ra: float, dec: float, radius_arcsec: float) -> list[tuple[str, pd.DataFrame]]:
+    params = {"-source": catalog, "-c": f"{ra} {dec}", "-c.rs": radius_arcsec, "-out": ",".join(cols),
+              "-out.add": "_r", "-out.max": 5000}
+    return parse_vizier_multi(http("GET", VIZIER_CFA, params=params).text)
+
+
+def _cone_vizier(table_sql: str, ra: float, dec: float, radius_arcsec: float) -> pd.DataFrame:
+    base = table_sql.split(" AS ")[0].split(" JOIN ")[0].strip()
+    cat, colmap = VIZIER_GAIA[base]
+    tabs = [t for t in vizier_cone(cat, list(colmap), ra, dec, radius_arcsec + POS_MARGIN_ARCSEC) if t[0] == cat]
+    if not tabs:
+        return pd.DataFrame(columns=list(colmap.values()) + ["sep_arcsec"])
+    df = tabs[0][1].rename(columns=colmap)
+    for c in df.columns:
+        if c != "source_id":
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "phot_g_mean_mag" not in df and base == "gaiadr3.vari_eclipsing_binary":
+        g = _cone_vizier("gaiadr3.gaia_source", ra, dec, radius_arcsec)
+        df = df.merge(g[["source_id", "phot_g_mean_mag", "pmra", "pmdec"]].astype({"source_id": str}), on="source_id", how="left")
+    for c in ("pmra", "pmdec"):
+        if c not in df:
+            df[c] = 0.0
+    df["source_id"] = df["source_id"].astype("int64")
+    df["sep_arcsec"] = _sep_j2000(df, ra, dec)
+    return df[df["sep_arcsec"] <= radius_arcsec].sort_values("sep_arcsec").reset_index(drop=True)
+
+
+def gaia_nss(ra: float, dec: float, radius_arcsec: float = 5.0, gaia_id=None) -> tuple[list[dict], dict]:
+    """Gaia DR3 non-single-star solutions (all I/357 tables, one VizieR call) + the target's RUWE."""
+    rows = []
+    for table, df in vizier_cone(NSS_CATALOG, ["Source", "NSSmodel", "Per", "ecc"], ra, dec, radius_arcsec):
+        if not table.startswith(NSS_CATALOG + "/"):
+            continue
+        for _, x in df.iterrows():
+            sid = _digits(x.get("Source"))
+            sep = _num(x.get("_r"))
+            rows.append({"table": table, "source_id": int(sid) if sid else None, "model": x.get("NSSmodel") or table.split("/")[-1],
+                         "period_d": _num(x.get("Per")), "ecc": _num(x.get("ecc")), "sep_arcsec": sep,
+                         "is_target": (gaia_id is not None and sid == str(gaia_id)) or (sep is not None and sep <= 1.5)})
+    ruwe = None
+    try:
+        g = _cone_vizier("gaiadr3.gaia_source", ra, dec, 3.0)
+        if len(g):
+            tid = pick_target(g, gaia_id)
+            if tid is not None:
+                ruwe = _num(g.loc[g["source_id"] == tid, "ruwe"].iloc[0])
+    except SourceDown:
+        pass
+    return rows, {"target_ruwe": ruwe}
 
 
 def pick_target(df: pd.DataFrame, gaia_id=None):
@@ -333,7 +426,7 @@ def epoch_offset(p, t0_btjd, cat_p, cat_t0_bjd, duration_h):
 def veto(tic, ra=None, dec=None, period_d=None, epoch_btjd=None, depth_ppm=None,
          eb_radius_arcsec: float = 21.0, neighbor_radius_arcsec: float = 120.0,
          cache_dir: Path | None = None, max_age_h: float = 24.0, refresh: bool = False,
-         alias_tol: float = 0.01) -> dict:
+         alias_tol: float = 0.01, nss: bool = True) -> dict:
     tic = parse_tic(tic)
     cache_dir = Path(cache_dir or default_cache_dir())
     cache = SourceCache(cache_dir, tic)
@@ -370,7 +463,7 @@ def veto(tic, ra=None, dec=None, period_d=None, epoch_btjd=None, depth_ppm=None,
 
     src["nasa_pscomppars"] = run_source("nasa_pscomppars", lambda: nasa_pscomppars(tic), cache, max_age_h, refresh)
     if ra is None:
-        for name in ("prsa_tess_eb", "gaia_dr3_neighbors", "gaia_dr3_eb"):
+        for name in ("prsa_tess_eb", "gaia_dr3_neighbors", "gaia_dr3_eb", "gaia_dr3_nss"):
             src[name] = {"status": "down", "matches": [], "error": "no target coordinates", "failed_at": now_et()}
     else:
         src["prsa_tess_eb"] = run_source(f"prsa_tess_eb_{eb_radius_arcsec:g}",
@@ -380,6 +473,9 @@ def veto(tic, ra=None, dec=None, period_d=None, epoch_btjd=None, depth_ppm=None,
             lambda: gaia_neighbors(ra, dec, neighbor_radius_arcsec, depth_ppm, gaia_id), cache, max_age_h, refresh)
         src["gaia_dr3_eb"] = run_source(f"gaia_dr3_eb_{eb_radius_arcsec:g}",
                                         lambda: gaia_ebs(ra, dec, eb_radius_arcsec, gaia_id), cache, max_age_h, refresh)
+        if nss:
+            src["gaia_dr3_nss"] = run_source("gaia_dr3_nss_5", lambda: gaia_nss(ra, dec, 5.0, gaia_id), cache, max_age_h,
+                                             refresh)
 
     # ---- flags
     tois = src["exofop_toi"]["matches"]
@@ -396,6 +492,11 @@ def veto(tic, ra=None, dec=None, period_d=None, epoch_btjd=None, depth_ppm=None,
         "nearby_eb": any(not m["is_target"] for m in src.get("prsa_tess_eb", {}).get("matches", []))
                      or any(not m["is_target"] for m in src.get("gaia_dr3_eb", {}).get("matches", [])),
     }
+    nss_t = [m for m in src.get("gaia_dr3_nss", {}).get("matches", []) if m["is_target"]]
+    ruwe = (src.get("gaia_dr3_nss", {}).get("extra") or {}).get("target_ruwe")
+    flags["nss_orbit"] = bool(nss_t)
+    flags["nss_binary"] = any(m["model"] in NSS_BINARY_MODELS for m in nss_t)
+    flags["high_ruwe"] = ruwe is not None and ruwe > RUWE_HIGH
     nb = src.get("gaia_dr3_neighbors", {}).get("matches", [])
     flags["bright_neighbor_within_eb_radius"] = any(
         (not m["is_target"]) and m["sep_arcsec"] <= eb_radius_arcsec and m["delta_g"] is not None and m["delta_g"] < 5
@@ -410,6 +511,7 @@ def veto(tic, ra=None, dec=None, period_d=None, epoch_btjd=None, depth_ppm=None,
                   for m in src["nasa_pscomppars"]["matches"]]
         cands += [("prsa_tess_eb", m["tic"], m["period_d"], m["bjd0"], None) for m in src.get("prsa_tess_eb", {}).get("matches", [])]
         cands += [("gaia_dr3_eb", m["source_id"], m["period_d"], None, None) for m in src.get("gaia_dr3_eb", {}).get("matches", [])]
+        cands += [("gaia_dr3_nss", f"{m['source_id']} {m['model']}", m["period_d"], None, None) for m in nss_t if m["period_d"]]
         for source, ident, p_cat, t0_cat, dur in cands:
             rel = period_relation(period_d, p_cat, alias_tol)
             if rel:
@@ -419,7 +521,7 @@ def veto(tic, ra=None, dec=None, period_d=None, epoch_btjd=None, depth_ppm=None,
     flags["period_matches_catalog"] = bool(aliases)
 
     down = [k for k, v in src.items() if v["status"] == "down"]
-    hit = [k for k in ("known_planet", "toi", "ctoi", "eb", "nearby_eb", "period_matches_catalog") if flags[k]]
+    hit = [k for k in ("known_planet", "toi", "ctoi", "eb", "nearby_eb", "nss_binary", "period_matches_catalog") if flags[k]]
     if hit:
         verdict = "known_object"
     elif down:
@@ -432,6 +534,12 @@ def veto(tic, ra=None, dec=None, period_d=None, epoch_btjd=None, depth_ppm=None,
     if flags["known_planet"] and flags["eb"]:
         notes.append("target is a known planet and also has an EB-catalog entry (Prsa+2022 and Gaia EB lists "
                      "contain some hot Jupiters); read eb as 'catalog entry exists', not as a disproof")
+    if flags["nss_orbit"] and not flags["nss_binary"]:
+        notes.append("Gaia DR3 has a non-single-star solution for the target (" + ", ".join(
+            f"{m['model']}" + (f" P={m['period_d']:.2f} d" if m["period_d"] else "") for m in nss_t) +
+            "): a companion exists; check the transit is not on it")
+    if flags["high_ruwe"]:
+        notes.append(f"target RUWE {ruwe:.2f} > {RUWE_HIGH}: astrometry suggests an unresolved companion")
     if not nb or not any(m["is_target"] for m in nb):
         notes.append("Gaia target counterpart not identified; delta_g columns are empty")
     result = {
