@@ -50,7 +50,7 @@ SIGNAL_KEYS = ["period_d", "epoch_btjd", "duration_h", "depth_ppm", "depth_err_p
 def code_hash() -> str:
     h = hashlib.sha256()
     for p in sorted(Path(__file__).parent.glob("*.py")):
-        if p.name != "hunt.py":      # orchestration changes do not change what the controls test
+        if p.name not in ("hunt.py", "survey.py"):   # orchestration changes do not change what the controls test
             h.update(p.read_bytes())
     return h.hexdigest()[:12]
 
@@ -275,7 +275,9 @@ def run_hunt(a) -> int:
         if step("triage") and not a.skip_bls:
             from .bls_triage import load_run, triage
 
-            tri = triage(load_run(run_dir), out_dir=run_dir)
+            extra = run_dir / "bad_windows_extra.json"   # written by `survey` from the whole CCD
+            tri = triage(load_run(run_dir), out_dir=run_dir,
+                         extra_windows=json.loads(extra.read_text()) if extra.exists() else None)
             prog.set("triage", status="done", n_survivors=tri["n_survivors"], n_near_miss=tri["n_near_miss"],
                      fail_counts=tri["fail_counts"], n_bad_windows=len(tri["bad_windows"]))
 

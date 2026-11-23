@@ -165,10 +165,25 @@ def archive_url(uri: str) -> str | None:
     return None
 
 
+MIRROR_SKIP_S = 600.0
+_mirror_down_until = 0.0     # circuit breaker: after the archive mirror fails, go straight to the MAST API for a while
+
+
+def _mirror_ok() -> bool:
+    return time.time() >= _mirror_down_until
+
+
+def _mirror_failed(exc) -> None:
+    global _mirror_down_until
+    if _throttled(exc) is not None or isinstance(exc, requests.ConnectionError):
+        _mirror_down_until = time.time() + MIRROR_SKIP_S
+
+
 def _download(uri: str, dest: Path, timeout: float = 300) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
-    tries = [(u, None) for u in [archive_url(uri)] if u] + [(MAST_DOWNLOAD, {"uri": uri})]
+    mirror = archive_url(uri) if _mirror_ok() else None
+    tries = [(u, None, True) for u in [mirror] if u] + [(MAST_DOWNLOAD, {"uri": uri}, False)]
     errors = []
     def get(url, params):
         with requests.get(url, params=params, headers=UA, stream=True, timeout=timeout) as r:
@@ -177,9 +192,16 @@ def _download(uri: str, dest: Path, timeout: float = 300) -> None:
                 for chunk in r.iter_content(1 << 16):
                     f.write(chunk)
 
-    for url, params in tries:
+    for url, params, is_mirror in tries:
         try:
-            with_backoff(get, url, params)
+            if is_mirror:
+                try:
+                    with_backoff(get, url, params, tries=2)
+                except Exception as exc:
+                    _mirror_failed(exc)
+                    raise
+            else:
+                with_backoff(get, url, params)
             with fits.open(tmp) as hdul:  # refuse to cache an HTML error page
                 hdul[1].header  # noqa: B018
             tmp.replace(dest)

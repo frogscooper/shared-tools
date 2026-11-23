@@ -127,11 +127,28 @@ def triage_star(star, wins, cuts=None, all_signals=False):
     return rows
 
 
-def triage(stars, cuts=None, all_signals=False, out_dir=None) -> dict:
-    """stars: list of {tic, rstar, rho_solar, signals, singles, coverage}. Returns counts, survivors, near misses."""
+def merge_windows(*lists):
+    ws = sorted((w for l in lists for w in (l or [])), key=lambda w: w["start_btjd"])
+    out = []
+    for w in ws:
+        if out and w["start_btjd"] <= out[-1]["end_btjd"] + 1e-9:
+            out[-1] = {**out[-1], "end_btjd": max(out[-1]["end_btjd"], w["end_btjd"]),
+                       "max_stars": max(out[-1].get("max_stars", 0), w.get("max_stars", 0))}
+        else:
+            out.append(dict(w))
+    return out
+
+
+def triage(stars, cuts=None, all_signals=False, out_dir=None, extra_windows=None) -> dict:
+    """stars: list of {tic, rstar, rho_solar, signals, singles, coverage}. Returns counts, survivors, near misses.
+
+    extra_windows: bad windows found elsewhere (e.g. by `survey` over the whole CCD) to add to the ones
+    found from these stars.
+    """
     c = {**CUTS, **(cuts or {})}
     stars = [s for s in stars if s.get("ok", True)]
     wins, info = bad_windows(stars, c["bad_bin_d"], c["bad_min_stars"], c["bad_factor"])
+    wins = merge_windows(wins, extra_windows)
     rows = [r for s in stars for r in triage_star(s, wins, c, all_signals)]
     fail_counts = {}
     for r in rows:

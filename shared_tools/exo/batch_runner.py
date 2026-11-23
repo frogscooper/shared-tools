@@ -132,7 +132,14 @@ def ccd_targets(sector, camera, ccd, cache_dir):
 
     p = Path(cache_dir) / "target_lists" / f"tess-spoc_s{sector:04d}.csv"
     if not p.exists():
-        r = http("GET", f"https://archive.stsci.edu/hlsps/tess-spoc/target_lists/s{sector:04d}.csv", timeout=(20, 300))
+        name = f"tess-spoc/target_lists/s{sector:04d}.csv"
+        try:
+            r = http("GET", f"https://archive.stsci.edu/hlsps/{name}", timeout=(20, 300))
+        except Exception:  # archive mirror down: the MAST download API serves the same file
+            r = http("GET", "https://mast.stsci.edu/api/v0.1/Download/file", params={"uri": f"mast:HLSP/{name}"},
+                     timeout=(20, 300))
+        if not r.content[:40].lstrip(b"#").upper().startswith(b"TIC"):
+            raise RuntimeError(f"target list s{sector} is not a CSV: {r.content[:80]!r}")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(r.content)
     df = pd.read_csv(p)
